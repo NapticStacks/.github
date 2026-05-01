@@ -1,8 +1,8 @@
 # Naptic
 
-**AI automation solutions for impact-focused ventures.**
+**Responsible AI for human-centric impact.**
 
-Naptic builds agentic systems that help founders reclaim time and scale operations — across health, wellness, operations, and systems work. We engineer the tools, ship the integrations, and stand behind the runtime.
+Naptic builds agentic systems that automate workflows, enhance decision-making, and scale impact — without losing the human touch.
 
 → [synapticstack.ai](https://synapticstack.ai)
 
