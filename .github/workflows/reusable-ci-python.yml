@@ -1,0 +1,219 @@
+# Reusable Python CI for NapticStacks repos.
+#
+# Call from a repo's .github/workflows/ci.yml with the caller job-id `ci` so the
+# emitted check contexts are deterministic:
+#   ci / lint            (ruff)           <- typically required
+#   ci / unit            (pytest)         <- typically required
+#   ci / typecheck       (mypy)           <- off by default (opt-in)
+#   ci / SAST (bandit)   (bandit)         <- on by default, evidence
+#   ci / SCA (pip-audit) (pip-audit)      <- on by default, evidence
+#
+# `dependency_install` selects the toolchain: "uv" (uv sync + uv run) or "pip"
+# (setup-python + pip install). Tools (ruff/mypy/bandit/pip-audit) are installed
+# explicitly so availability never depends on the repo declaring them. The repo's
+# OWN deps (needed for mypy/pytest imports) come from `install_command`.
+#
+# All `uses:` are pinned to immutable commit SHAs.
+
+name: Reusable CI (Python)
+
+on:
+  workflow_call:
+    inputs:
+      dependency_install:
+        description: '"uv" or "pip".'
+        type: string
+        default: "pip"
+      python_version:
+        type: string
+        default: "3.12"
+      install_command:
+        description: "Command to install the repo's own deps (for mypy/pytest imports). pip example: 'pip install -e .' ; uv example: 'uv sync --extra dev'."
+        type: string
+        default: ""
+      lint_paths:
+        type: string
+        default: "."
+      mypy_paths:
+        type: string
+        default: "src"
+      bandit_paths:
+        type: string
+        default: "src scripts"
+      pytest_args:
+        type: string
+        default: "-m 'not live'"
+      run_lint:
+        type: boolean
+        default: true
+      run_typecheck:
+        type: boolean
+        default: false
+      run_unit:
+        type: boolean
+        default: true
+      run_bandit:
+        type: boolean
+        default: true
+      run_sca:
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint
+    if: ${{ inputs.run_lint }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+      - if: ${{ inputs.dependency_install == 'uv' }}
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7.6.0
+        with:
+          python-version: ${{ inputs.python_version }}
+      - if: ${{ inputs.dependency_install != 'uv' }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: ${{ inputs.python_version }}
+      - name: ruff check
+        run: |
+          if [ "${{ inputs.dependency_install }}" = "uv" ]; then
+            uv tool run ruff check ${{ inputs.lint_paths }}
+          else
+            pip install ruff
+            ruff check ${{ inputs.lint_paths }}
+          fi
+
+  typecheck:
+    name: typecheck
+    if: ${{ inputs.run_typecheck }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+      - if: ${{ inputs.dependency_install == 'uv' }}
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7.6.0
+        with:
+          python-version: ${{ inputs.python_version }}
+      - if: ${{ inputs.dependency_install != 'uv' }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: ${{ inputs.python_version }}
+      - name: mypy
+        run: |
+          if [ "${{ inputs.dependency_install }}" = "uv" ]; then
+            ${{ inputs.install_command || 'uv sync --extra dev' }}
+            uv run mypy ${{ inputs.mypy_paths }}
+          else
+            ${{ inputs.install_command }}
+            pip install mypy
+            mypy ${{ inputs.mypy_paths }}
+          fi
+
+  unit:
+    name: unit
+    if: ${{ inputs.run_unit }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+      - if: ${{ inputs.dependency_install == 'uv' }}
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7.6.0
+        with:
+          python-version: ${{ inputs.python_version }}
+      - if: ${{ inputs.dependency_install != 'uv' }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: ${{ inputs.python_version }}
+      - name: pytest
+        # Exit code 5 = "no tests collected" — treat as pass so a repo without a
+        # suite yet does not hang the required `ci / unit` gate.
+        run: |
+          if [ "${{ inputs.dependency_install }}" = "uv" ]; then
+            ${{ inputs.install_command || 'uv sync --extra dev' }}
+            uv run pytest ${{ inputs.pytest_args }}; code=$?
+          else
+            ${{ inputs.install_command }}
+            pip install pytest
+            pytest ${{ inputs.pytest_args }}; code=$?
+          fi
+          if [ "$code" -eq 5 ]; then echo "no tests collected — treating as pass"; exit 0; fi
+          exit $code
+
+  bandit:
+    name: SAST (bandit)
+    if: ${{ inputs.run_bandit }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+      - if: ${{ inputs.dependency_install == 'uv' }}
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7.6.0
+        with:
+          python-version: ${{ inputs.python_version }}
+      - if: ${{ inputs.dependency_install != 'uv' }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: ${{ inputs.python_version }}
+      - name: bandit (SARIF artifact + high-severity gate)
+        run: |
+          RUN="pip install 'bandit[sarif,toml]==1.7.10' && bandit"
+          if [ "${{ inputs.dependency_install }}" = "uv" ]; then
+            uv tool install "bandit[sarif,toml]==1.7.10"
+            RUN="uv tool run bandit"
+          else
+            pip install "bandit[sarif,toml]==1.7.10"
+            RUN="bandit"
+          fi
+          # SARIF artifact (never fails), then a strict high-severity rerun gate.
+          $RUN -r ${{ inputs.bandit_paths }} --severity-level medium --confidence-level medium -f sarif -o bandit.sarif || true
+          $RUN -r ${{ inputs.bandit_paths }} --severity-level high --confidence-level medium
+      - name: Upload bandit SARIF
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: bandit-sarif
+          path: bandit.sarif
+          if-no-files-found: ignore
+          retention-days: 90
+
+  pip-audit:
+    name: SCA (pip-audit)
+    if: ${{ inputs.run_sca }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+      - if: ${{ inputs.dependency_install == 'uv' }}
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7.6.0
+        with:
+          python-version: ${{ inputs.python_version }}
+      - if: ${{ inputs.dependency_install != 'uv' }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: ${{ inputs.python_version }}
+      - name: pip-audit (visibility-only)
+        # Resolve a requirements file then audit. Non-fatal for now — tighten to
+        # fail-on-vuln in a follow-up once existing advisories are triaged.
+        run: |
+          if [ "${{ inputs.dependency_install }}" = "uv" ]; then
+            uv tool install pip-audit
+            if [ -f uv.lock ]; then
+              uv export --format requirements-txt --no-hashes --no-dev > requirements.audit.txt
+            else
+              uv pip compile pyproject.toml --no-header -o requirements.audit.txt
+            fi
+            uv tool run pip-audit -r requirements.audit.txt --format=json --output=pip-audit.json || true
+            uv tool run pip-audit -r requirements.audit.txt || true
+          else
+            pip install pip-audit
+            if [ -f requirements.txt ]; then TARGET="-r requirements.txt"; else TARGET="."; fi
+            pip-audit $TARGET --format=json --output=pip-audit.json || true
+            pip-audit $TARGET || true
+          fi
+      - name: Upload pip-audit report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: pip-audit-report
+          path: pip-audit.json
+          if-no-files-found: ignore
+          retention-days: 90
