@@ -1,0 +1,117 @@
+# Reusable Node CI for NapticStacks repos.
+#
+# Call from a repo's .github/workflows/ci.yml with the caller job-id `ci` so the
+# emitted check contexts are deterministic:
+#   ci / lint             <- off by default (set run_lint + lint_command)
+#   ci / typecheck        <- off by default (set run_typecheck + typecheck_command)
+#   ci / unit             <- off by default (set run_unit + test_command)
+#   ci / SCA (npm-audit)  <- on by default
+#
+# Toggles default OFF (except SCA) because some Node repos (e.g. sales-naptic)
+# have no lint/test wired yet — enable each gate only once the repo has it and a
+# green run has been observed. All `uses:` are pinned to immutable commit SHAs.
+
+name: Reusable CI (Node)
+
+on:
+  workflow_call:
+    inputs:
+      node_version:
+        type: string
+        default: "20"
+      install_command:
+        description: "Dependency install. Default auto-detects npm ci vs npm install."
+        type: string
+        default: ""
+      lint_command:
+        type: string
+        default: "npm run lint"
+      typecheck_command:
+        type: string
+        default: "npm run typecheck"
+      test_command:
+        type: string
+        default: "npm test"
+      audit_level:
+        description: "npm audit failure threshold."
+        type: string
+        default: "high"
+      run_lint:
+        type: boolean
+        default: false
+      run_typecheck:
+        type: boolean
+        default: false
+      run_unit:
+        type: boolean
+        default: false
+      run_sca:
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint
+    if: ${{ inputs.run_lint }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: ${{ inputs.node_version }}
+      - name: install + lint
+        run: |
+          if [ -n "${{ inputs.install_command }}" ]; then ${{ inputs.install_command }};
+          elif [ -f package-lock.json ]; then npm ci; else npm install; fi
+          ${{ inputs.lint_command }}
+
+  typecheck:
+    name: typecheck
+    if: ${{ inputs.run_typecheck }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: ${{ inputs.node_version }}
+      - name: install + typecheck
+        run: |
+          if [ -n "${{ inputs.install_command }}" ]; then ${{ inputs.install_command }};
+          elif [ -f package-lock.json ]; then npm ci; else npm install; fi
+          ${{ inputs.typecheck_command }}
+
+  unit:
+    name: unit
+    if: ${{ inputs.run_unit }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: ${{ inputs.node_version }}
+      - name: install + test
+        run: |
+          if [ -n "${{ inputs.install_command }}" ]; then ${{ inputs.install_command }};
+          elif [ -f package-lock.json ]; then npm ci; else npm install; fi
+          ${{ inputs.test_command }}
+
+  npm-audit:
+    name: SCA (npm-audit)
+    if: ${{ inputs.run_sca }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: ${{ inputs.node_version }}
+      - name: npm audit
+        # Green-skips when there's no Node project yet, so the context emits and
+        # can be required without hanging a repo with no package.json.
+        run: |
+          if [ ! -f package.json ]; then echo "no package.json — nothing to audit"; exit 0; fi
+          if [ -f package-lock.json ]; then npm ci --ignore-scripts || npm install --ignore-scripts;
+          else npm install --ignore-scripts --package-lock-only; fi
+          npm audit --audit-level=${{ inputs.audit_level }}
