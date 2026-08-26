@@ -12,6 +12,20 @@
 # than uploading to code-scanning.
 #
 # All `uses:` are pinned to immutable commit SHAs. Bump only via a reviewed PR.
+#
+# gitleaks scans FULL HISTORY on every event, pull_request included. It used to
+# scan only the PR diff on pull_request, which made the gate asymmetric: a
+# finding baked into an old commit passed every PR and then failed every merge
+# to the default branch, forever, because no new commit can change history. The
+# result was a permanently red default branch that paged a human on each merge
+# and trained everyone to ignore the one hard security gate. That noise was
+# concealing genuine leaked credentials in at least two repos (2026-08-25).
+#
+# Consequence of the symmetry: a repo whose history contains findings now fails
+# at PR time. That is the point — the gate blocks before merge instead of
+# complaining after. Triage each finding and record it in a repo-root
+# `.gitleaksignore`, one fingerprint per line with its justification. NEVER
+# waive a real secret: rotate it, then purge it.
 
 name: Reusable Security (agnostic)
 
@@ -50,14 +64,11 @@ jobs:
           tar -xzf gitleaks.tar.gz gitleaks
           sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
           gitleaks version
-      - name: Run gitleaks (PR diff)
-        if: github.event_name == 'pull_request'
-        run: |
-          gitleaks detect --source . \
-            --log-opts "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}" \
-            --redact --verbose --no-banner --report-format sarif --report-path gitleaks.sarif
+      # ONE scan for every event. Previously `pull_request` scanned only
+      # base..head while push/cron scanned all history, so a finding in an old
+      # commit passed every PR and failed every merge — a red default branch no
+      # future commit could turn green. See the header note.
       - name: Run gitleaks (full history)
-        if: github.event_name != 'pull_request'
         run: |
           gitleaks detect --source . \
             --redact --verbose --no-banner --report-format sarif --report-path gitleaks.sarif
