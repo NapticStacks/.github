@@ -8,13 +8,14 @@ assignees: ''
 
 <!--
 MIRROR. This is the NapticStacks org default issue template. Every repo without its own
-.github/ISSUE_TEMPLATE picks it up. The canonical copy lives in the project-manager repo at
+.github/ISSUE_TEMPLATE picks it up. The canonical copy lives in the PM repo at
 .github/ISSUE_TEMPLATE/feature-task.md. Edit it there first, then mirror the change here.
 
 How to fill this in:
 - The `pm:` HTML comments are the contract. Heading text is yours to reword. Do not delete a marker.
 - Anything in [square brackets] counts as EMPTY to the readiness check. Replace the whole bracket.
 - Set the Target date issue field before you assign this. A missing date blocks the brief.
+- The `pm:end` marker closes the brief. The readiness check ignores everything below it.
 -->
 
 <!-- pm:outcome -->
@@ -23,7 +24,7 @@ How to fill this in:
 
 <!-- pm:why -->
 ## Why this matters
-<!-- Board: the My work view on the Naptic Engineering org board, https://github.com/orgs/NapticStacks/projects/<N> (N is the Naptic Engineering board number). -->
+<!-- Board: your My work view on the Naptic Engineering org board, https://github.com/orgs/NapticStacks/projects/41 -->
 - **Advances:** [which KPI row, for which engagement]
 - **Parent:** [#N of the epic, or "none yet"]
 - **Approver:** [@login, backup @login; escalates after 48 hours]
@@ -65,6 +66,8 @@ Three phases, in order. Do not merge them together.
 - `superpowers:requesting-code-review`
 - `/ship`
 - Write an inventor-notebook entry at each decision along the way.
+
+<!-- pm:end -->
 
 ## Claude Code Instructions
 <!-- Engineers: paste this issue into Claude Code with "Use Plan Mode first" -->
