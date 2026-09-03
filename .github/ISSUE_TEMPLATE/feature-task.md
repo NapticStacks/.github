@@ -15,6 +15,7 @@ How to fill this in:
 - The `pm:` HTML comments are the contract. Heading text is yours to reword. Do not delete a marker.
 - Anything in [square brackets] counts as EMPTY to the readiness check. Replace the whole bracket.
 - Set the Target date issue field before you assign this. A missing date blocks the brief.
+- The `pm:end` marker closes the brief. The readiness check ignores everything below it.
 -->
 
 <!-- pm:outcome -->
@@ -65,6 +66,8 @@ Three phases, in order. Do not merge them together.
 - `superpowers:requesting-code-review`
 - `/ship`
 - Write an inventor-notebook entry at each decision along the way.
+
+<!-- pm:end -->
 
 ## Claude Code Instructions
 <!-- Engineers: paste this issue into Claude Code with "Use Plan Mode first" -->
