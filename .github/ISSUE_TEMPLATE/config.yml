@@ -1,0 +1,4 @@
+# Org default issue-template chooser for NapticStacks.
+# Blank issues stay on: quick notes and scratch items should not be forced through the
+# delegation contract. Assigned work uses "Feature / Task".
+blank_issues_enabled: true
