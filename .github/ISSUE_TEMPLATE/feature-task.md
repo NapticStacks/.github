@@ -48,8 +48,7 @@ Three phases, in order. Do not merge them together.
 
 **Prepare**
 - Open with `/context-restore`, or `/picking-up-work` if this is a fresh session.
-- From the project-manager repo, run `python3 scripts/github/delegation_readiness.py --issue <this issue url>`.
-- Any gap means the brief is not ready. Comment `needs-brief: <gap>`, reassign to the person who assigned it, and stop.
+- Run the readiness check from the PM repo (your onboarding quick-reference, section 7, has the command); any gap means comment `needs-brief: <gap>`, reassign to the assigner, and stop.
 - Turn on Plan Mode (Shift+Tab), then run `superpowers:writing-plans`.
 
 **Request approval (gate #1)**
