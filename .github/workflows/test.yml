@@ -1,0 +1,46 @@
+# CI for THIS repo (NapticStacks/.github) itself.
+#
+# The reusable workflows here are consumed org-wide at @v1, so a regression in
+# the logic they call lands everywhere at once. `scripts/test_count.py` carries
+# the test-count guard's real logic and is unit-tested by
+# `scripts/test_test_count.py`; this workflow runs those tests on every PR.
+#
+# Only `scripts/test_test_count.py` is collected, never `scripts/fixtures/*` --
+# the fixtures include a deliberately unimportable suite. `scripts/conftest.py`
+# enforces the same exclusion for anyone running pytest by hand.
+#
+# All `uses:` are pinned to immutable commit SHAs.
+
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: "20"
+      - name: Install pytest
+        run: pip install pytest
+      - name: Install the jest fixture's dev dependency
+        # Lets the jest branch of count() actually run in CI. Local dev boxes
+        # skip that one test with a reason instead of installing node_modules.
+        working-directory: scripts/fixtures/jest_project
+        run: npm install --no-audit --no-fund
+      - name: pytest
+        working-directory: scripts
+        run: python -m pytest test_test_count.py -q
