@@ -8,7 +8,7 @@ assignees: ''
 
 <!--
 MIRROR. This is the NapticStacks org default issue template. Every repo without its own
-.github/ISSUE_TEMPLATE picks it up. The canonical copy lives in the project-manager repo at
+.github/ISSUE_TEMPLATE picks it up. The canonical copy lives in the PM repo at
 .github/ISSUE_TEMPLATE/feature-task.md. Edit it there first, then mirror the change here.
 
 How to fill this in:
@@ -23,7 +23,7 @@ How to fill this in:
 
 <!-- pm:why -->
 ## Why this matters
-<!-- Board: the My work view on the Naptic Engineering org board, https://github.com/orgs/NapticStacks/projects/<N> (N is the Naptic Engineering board number). -->
+<!-- Board: your My work view on the Naptic Engineering org board, https://github.com/orgs/NapticStacks/projects/41 -->
 - **Advances:** [which KPI row, for which engagement]
 - **Parent:** [#N of the epic, or "none yet"]
 - **Approver:** [@login, backup @login; escalates after 48 hours]
