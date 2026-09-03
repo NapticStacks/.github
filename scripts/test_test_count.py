@@ -175,3 +175,39 @@ def test_collection_error_named_not_count_drop():
     assert result != tc.VERDICT_DROPPED
     # Not even the override label may disguise it.
     assert tc.verdict(base, head, label_present=True) == tc.VERDICT_COLLECTION_ERROR
+
+
+# ----------------------- GITHUB_OUTPUT contract -----------------------
+# verdict / base_count / head_count are declared workflow_call outputs, so their
+# rendering is a caller-visible contract.
+
+def read_outputs(tmp_path, monkeypatch, base, head, *extra):
+    out = tmp_path / "gh_output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    code = tc.main(["--base", str(base), "--head", str(head), *extra])
+    parsed = dict(
+        line.split("=", 1) for line in out.read_text().splitlines() if "=" in line
+    )
+    return code, parsed
+
+
+def test_main_emits_outputs_on_pass(tmp_path, monkeypatch):
+    code, out = read_outputs(tmp_path, monkeypatch, PYTEST_PROJECT, PYTEST_PROJECT)
+    assert code == 0
+    assert out == {"verdict": "pass", "base_count": "2", "head_count": "2"}
+
+
+def test_main_emits_empty_count_not_the_string_none(tmp_path, monkeypatch):
+    # A missing runner must render as "" for callers, never the literal "None".
+    code, out = read_outputs(tmp_path, monkeypatch, EMPTY_PROJECT, EMPTY_PROJECT)
+    assert code == 0
+    assert out["verdict"] == tc.VERDICT_NOOP
+    assert out["base_count"] == ""
+    assert out["head_count"] == ""
+    assert "None" not in out.values()
+
+
+def test_main_emits_outputs_and_fails_on_collection_error(tmp_path, monkeypatch):
+    code, out = read_outputs(tmp_path, monkeypatch, PYTEST_PROJECT, IMPORT_ERROR_PROJECT)
+    assert code == 1
+    assert out["verdict"] == tc.VERDICT_COLLECTION_ERROR

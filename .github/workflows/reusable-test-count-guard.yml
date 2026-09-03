@@ -48,6 +48,16 @@ on:
         description: "Optional command to install the repo's deps in EACH checkout, so `pytest --collect-only` can import test modules. Example: 'pip install -e .'"
         type: string
         default: ""
+    outputs:
+      verdict:
+        description: "One of: pass, dropped, collection_error, noop. Empty when the job was skipped (non-pull_request event)."
+        value: ${{ jobs.test-count.outputs.verdict }}
+      base_count:
+        description: "Collectible tests on the base branch. Empty when no runner was detected there."
+        value: ${{ jobs.test-count.outputs.base_count }}
+      head_count:
+        description: "Collectible tests on the PR head. Empty when no runner was detected there."
+        value: ${{ jobs.test-count.outputs.head_count }}
 
 permissions:
   contents: read
@@ -58,6 +68,10 @@ jobs:
     # Only a pull_request has two sides to compare.
     if: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
+    outputs:
+      verdict: ${{ steps.guard.outputs.verdict }}
+      base_count: ${{ steps.guard.outputs.base_count }}
+      head_count: ${{ steps.guard.outputs.head_count }}
     steps:
       - name: Check out PR head
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
@@ -95,19 +109,35 @@ jobs:
         if: ${{ inputs.install_command != '' }}
         # Collection imports test modules, so missing deps read as a collection
         # error. Both sides must be installed or the comparison is asymmetric.
+        #
+        # The input is passed through `env:` and executed with `bash -c`, never
+        # interpolated into this script's text. A `${{ }}` expression is expanded
+        # BEFORE the shell sees the script, so a caller-supplied value containing
+        # shell metacharacters would otherwise be substituted as code rather than
+        # data. Via env it is only ever the argument to `bash -c`.
+        env:
+          INSTALL_COMMAND: ${{ inputs.install_command }}
         run: |
           set -euo pipefail
           for side in base head; do
-            ( cd "$side" && ${{ inputs.install_command }} )
+            ( cd "$side" && bash -c "$INSTALL_COMMAND" )
           done
 
       - name: Compare test counts
         id: guard
-        # See the NO AWS CREDENTIALS note in this file's header: this step runs
-        # with no cloud credentials on purpose. Do not add an `env:` block here.
+        # NOTE: this env block carries NO cloud credentials, deliberately -- see
+        # the NO AWS CREDENTIALS note in this file's header. Do not add any.
+        # Inputs travel through env rather than `${{ }}` inside the script, for
+        # the substitution reason explained on the step above.
+        env:
+          GUARD_LABEL: ${{ inputs.label }}
+          LABEL_PRESENT: ${{ contains(github.event.pull_request.labels.*.name, inputs.label) }}
         run: |
+          set -euo pipefail
+          FLAG=""
+          if [ "$LABEL_PRESENT" = "true" ]; then FLAG="--label-present"; fi
           python guard/scripts/test_count.py \
             --base base \
             --head head \
-            --label "${{ inputs.label }}" \
-            ${{ contains(github.event.pull_request.labels.*.name, inputs.label) && '--label-present' || '' }}
+            --label "$GUARD_LABEL" \
+            $FLAG

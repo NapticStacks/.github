@@ -68,10 +68,27 @@ jobs:
 ## Caller example — test-count guard
 
 ```yaml
+  # Python repo whose test modules import the package under test:
   test-count:
     uses: NapticStacks/.github/.github/workflows/reusable-test-count-guard.yml@v1
-    # Add `with: { install_command: "pip install -e ." }` when collection needs deps.
+    with:
+      install_command: "pip install -e ."
+
+  # Node repo — jest must be installed before it can list tests:
+  test-count:
+    uses: NapticStacks/.github/.github/workflows/reusable-test-count-guard.yml@v1
+    with:
+      install_command: "npm ci"
 ```
+
+**A Node repo without `install_command` will report `collection_error` on its
+first run.** The guard calls `npx --no-install jest --listTests`, which cannot
+list anything until `node_modules` exists — so set `install_command` (`npm ci`,
+or `npm install` where there is no lockfile) when wiring a Node repo. The same
+applies to a Python repo whose test modules import the package under test:
+without an install, collection fails on import and the guard says so rather than
+guessing. `install_command` runs in BOTH checkouts; an asymmetric install would
+make the comparison meaningless.
 
 Fails a PR when the count of collectible tests drops against the base branch.
 Runs on `pull_request` only (a push has no base to compare against), so it
@@ -93,6 +110,11 @@ green-skips elsewhere and must not be marked required on `push`.
   Slack/email/AWS if credentials are in the environment. The workflow declares no
   `AWS_*` env, calls no `configure-aws-credentials`, and requests no secrets. Do
   not call it with `secrets: inherit`.
+
+Callers can read the result: the workflow exposes `verdict`
+(`pass` / `dropped` / `collection_error` / `noop`), `base_count` and
+`head_count` as `workflow_call` outputs. The two counts are empty strings when
+no runner was detected on that side.
 
 The logic lives in `scripts/test_count.py` (unit-tested by
 `scripts/test_test_count.py` against fixtures in `scripts/fixtures/`); the

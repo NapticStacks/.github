@@ -182,9 +182,12 @@ def main(argv=None) -> int:
     print(f"base: n={base[0]} exit={base[1]}")
     print(f"head: n={head[0]} exit={head[1]}")
     print(f"verdict: {result}")
+    # These three are declared workflow_call outputs, so the empty-string
+    # rendering of "no runner detected" is a contract, not a detail. Never emit
+    # the literal "None".
     _emit("verdict", result)
-    _emit("base_count", str(base[0]))
-    _emit("head_count", str(head[0]))
+    _emit("base_count", "" if base[0] is None else str(base[0]))
+    _emit("head_count", "" if head[0] is None else str(head[0]))
 
     if result == VERDICT_COLLECTION_ERROR:
         print("\n::error::Test collection FAILED. This is a broken collector, not a test-count drop.")
