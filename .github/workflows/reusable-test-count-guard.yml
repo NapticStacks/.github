@@ -1,0 +1,151 @@
+# Reusable test-count guard for NapticStacks repos.
+#
+# Fails a PR when the number of collectible tests DROPS against the base branch.
+# Call from a repo's .github/workflows/ci.yml with the caller job-id
+# `test-count` so the emitted check context is deterministic:
+#   test-count / test-count guard
+#
+# Escape hatch: label the PR `tests-reduced-ok` (configurable via `label`) when
+# the reduction is deliberate -- deleting a dead module, merging duplicated
+# cases. The label is read from the `github` context, so no API token is needed.
+#
+# The guard NEVER fails for a reason it cannot name. A collector that errors
+# reports zero tests, and comparing that naively would report "you deleted
+# tests" while the real breakage (an import error, a bad conftest) goes unsaid.
+# Collection failures therefore surface as a distinct `collection_error` that
+# echoes the collector's own output. See scripts/test_count.py -> verdict().
+#
+# NO AWS CREDENTIALS ARE CONFIGURED HERE, DELIBERATELY.
+# Collecting tests imports every test module, which runs module-level code. Some
+# consumer repos' suites reach real Slack/email/AWS when credentials happen to
+# be present in the environment, so a mere *count* could send live traffic. This
+# workflow declares no AWS_* env, calls no configure-aws-credentials, and
+# requests no secrets -- a reusable workflow receives none unless the caller
+# passes `secrets: inherit`. DO NOT ADD CREDENTIALS TO THIS FILE.
+#
+# All `uses:` are pinned to immutable commit SHAs. Bump only via a reviewed PR.
+
+name: Reusable Test-Count Guard
+
+on:
+  workflow_call:
+    inputs:
+      label:
+        description: "PR label that waives a deliberate test-count reduction."
+        type: string
+        default: "tests-reduced-ok"
+      guard_ref:
+        description: "Ref of NapticStacks/.github to load scripts/test_count.py from. Keep in step with the caller's @ref."
+        type: string
+        default: "v1"
+      python_version:
+        type: string
+        default: "3.12"
+      node_version:
+        type: string
+        default: "20"
+      install_command:
+        description: "Optional command to install the repo's deps in EACH checkout, so `pytest --collect-only` can import test modules. Example: 'pip install -e .'"
+        type: string
+        default: ""
+    outputs:
+      verdict:
+        description: "One of: pass, dropped, collection_error, noop. Empty when the job was skipped (non-pull_request event)."
+        value: ${{ jobs.test-count.outputs.verdict }}
+      base_count:
+        description: "Collectible tests on the base branch. Empty when no runner was detected there."
+        value: ${{ jobs.test-count.outputs.base_count }}
+      head_count:
+        description: "Collectible tests on the PR head. Empty when no runner was detected there."
+        value: ${{ jobs.test-count.outputs.head_count }}
+
+permissions:
+  contents: read
+
+jobs:
+  test-count:
+    name: test-count guard
+    # Only a pull_request has two sides to compare.
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    outputs:
+      verdict: ${{ steps.guard.outputs.verdict }}
+      base_count: ${{ steps.guard.outputs.base_count }}
+      head_count: ${{ steps.guard.outputs.head_count }}
+    steps:
+      - name: Check out PR head
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: head
+
+      - name: Check out base branch
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+
+      # The counting logic lives in this repo so it is unit-tested (see
+      # scripts/test_test_count.py) instead of being untestable inline YAML.
+      - name: Check out the guard script
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          repository: NapticStacks/.github
+          ref: ${{ inputs.guard_ref }}
+          path: guard
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Install collectors
+        run: pip install pytest
+
+      - name: Install repo dependencies (both sides)
+        if: ${{ inputs.install_command != '' }}
+        # Collection imports test modules, so missing deps read as a collection
+        # error. Both sides must be installed or the comparison is asymmetric.
+        #
+        # CONSTRAINT: base and head install into the SAME runner-wide
+        # environment, so the LAST install wins -- head's. For a src-layout
+        # package imported by its installed name, the base branch is therefore
+        # collected against head's installed package. Fine when the two
+        # revisions are import-compatible (the common case); it can misreport
+        # when a PR renames or moves modules the base tests import. Splitting
+        # the sides into separate virtualenvs is the fix if that ever bites.
+        #
+        # The input is passed through `env:` and executed with `bash -c`, never
+        # interpolated into this script's text. A `${{ }}` expression is expanded
+        # BEFORE the shell sees the script, so a caller-supplied value containing
+        # shell metacharacters would otherwise be substituted as code rather than
+        # data. Via env it is only ever the argument to `bash -c`.
+        env:
+          INSTALL_COMMAND: ${{ inputs.install_command }}
+        run: |
+          set -euo pipefail
+          for side in base head; do
+            ( cd "$side" && bash -c "$INSTALL_COMMAND" )
+          done
+
+      - name: Compare test counts
+        id: guard
+        # NOTE: this env block carries NO cloud credentials, deliberately -- see
+        # the NO AWS CREDENTIALS note in this file's header. Do not add any.
+        # Inputs travel through env rather than `${{ }}` inside the script, for
+        # the substitution reason explained on the step above.
+        env:
+          GUARD_LABEL: ${{ inputs.label }}
+          LABEL_PRESENT: ${{ contains(github.event.pull_request.labels.*.name, inputs.label) }}
+        run: |
+          set -euo pipefail
+          FLAG=""
+          if [ "$LABEL_PRESENT" = "true" ]; then FLAG="--label-present"; fi
+          python guard/scripts/test_count.py \
+            --base base \
+            --head head \
+            --label "$GUARD_LABEL" \
+            $FLAG
