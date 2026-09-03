@@ -110,6 +110,14 @@ jobs:
         # Collection imports test modules, so missing deps read as a collection
         # error. Both sides must be installed or the comparison is asymmetric.
         #
+        # CONSTRAINT: base and head install into the SAME runner-wide
+        # environment, so the LAST install wins -- head's. For a src-layout
+        # package imported by its installed name, the base branch is therefore
+        # collected against head's installed package. Fine when the two
+        # revisions are import-compatible (the common case); it can misreport
+        # when a PR renames or moves modules the base tests import. Splitting
+        # the sides into separate virtualenvs is the fix if that ever bites.
+        #
         # The input is passed through `env:` and executed with `bash -c`, never
         # interpolated into this script's text. A `${{ }}` expression is expanded
         # BEFORE the shell sees the script, so a caller-supplied value containing

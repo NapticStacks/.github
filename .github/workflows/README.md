@@ -90,6 +90,16 @@ without an install, collection fails on import and the guard says so rather than
 guessing. `install_command` runs in BOTH checkouts; an asymmetric install would
 make the comparison meaningless.
 
+**Caveat — both installs share one environment, and the last one wins.** The job
+installs base then head into the same runner-wide Python/Node environment, so
+head's install is what remains when either side is collected. For a src-layout
+package imported by its installed name, that means the base branch is collected
+against *head's* installed package. It is fine when the two revisions' installed
+packages are import-compatible, which is the common case; it can misreport when
+a PR renames or moves modules that the base tests import. If that bites, treat
+the resulting `collection_error` as accurate — the counts genuinely were not
+comparable — and split the sides into separate virtualenvs in a follow-up.
+
 Fails a PR when the count of collectible tests drops against the base branch.
 Runs on `pull_request` only (a push has no base to compare against), so it
 green-skips elsewhere and must not be marked required on `push`.
@@ -98,6 +108,13 @@ green-skips elsewhere and must not be marked required on `push`.
   pytest-mentioning `pyproject.toml` / any `test_*.py` or `*_test.py` exists;
   jest when `package.json` names jest. Both present ⇒ counts are summed.
   Neither ⇒ verdict `noop` and a notice, never a failure.
+- **The two runners count different units.** pytest counts individual test
+  *cases* (`--collect-only` test ids); jest counts test **files**
+  (`--listTests`), because listing files is all jest will do without executing
+  the suite. So deleting cases from an existing jest file does not move the
+  number — only deleting a whole file does. In a mixed repo the guard sums a
+  case count and a file count into one total, which is a coarse number: it is
+  a tripwire for "coverage left the repo", not a coverage metric.
 - **Escape hatch.** Label the PR `tests-reduced-ok` when the reduction is
   intended. Read from the `github` context, so no token is required.
 - **A broken collector is never reported as a test-count drop.** Collection

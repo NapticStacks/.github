@@ -211,3 +211,46 @@ def test_main_emits_outputs_and_fails_on_collection_error(tmp_path, monkeypatch)
     code, out = read_outputs(tmp_path, monkeypatch, PYTEST_PROJECT, IMPORT_ERROR_PROJECT)
     assert code == 1
     assert out["verdict"] == tc.VERDICT_COLLECTION_ERROR
+
+
+# --------------------- collector never ran at all ---------------------
+# A missing binary or a hung collection must not escape as an exception: that
+# would skip _emit() and leave the workflow's declared outputs unset, failing
+# the job with no verdict and no named reason.
+
+def test_missing_collector_binary_is_a_named_collection_error(monkeypatch):
+    def no_such_binary(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "npx")
+
+    monkeypatch.setattr(tc.subprocess, "run", no_such_binary)
+    n, code, err = tc.count(PYTEST_PROJECT)
+
+    assert code == tc.COLLECTOR_UNAVAILABLE
+    assert "FileNotFoundError" in err
+    assert tc.verdict(r(2), (n, code, err), False) == tc.VERDICT_COLLECTION_ERROR
+
+
+def test_hung_collector_is_a_named_collection_error(monkeypatch):
+    def never_finishes(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="pytest", timeout=tc.COLLECT_TIMEOUT_SECONDS)
+
+    monkeypatch.setattr(tc.subprocess, "run", never_finishes)
+    n, code, err = tc.count(PYTEST_PROJECT)
+
+    assert code == tc.COLLECTOR_TIMEOUT
+    assert "TimeoutExpired" in err
+    assert tc.verdict(r(2), (n, code, err), False) == tc.VERDICT_COLLECTION_ERROR
+
+
+def test_missing_collector_still_populates_declared_outputs(tmp_path, monkeypatch):
+    """The whole point: outputs are set even when the collector never ran."""
+    def no_such_binary(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "npx")
+
+    monkeypatch.setattr(tc.subprocess, "run", no_such_binary)
+    code, out = read_outputs(tmp_path, monkeypatch, PYTEST_PROJECT, PYTEST_PROJECT)
+
+    assert code == 1
+    assert out["verdict"] == tc.VERDICT_COLLECTION_ERROR
+    assert out["base_count"] == "0"
+    assert out["head_count"] == "0"

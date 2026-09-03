@@ -32,6 +32,13 @@ PYTEST_USAGE_ERROR = 4
 PYTEST_NO_TESTS_COLLECTED = 5   # NOT an error: a real count of zero
 PYTEST_COLLECTION_ERROR_CODES = (PYTEST_INTERRUPTED, PYTEST_INTERNAL_ERROR, PYTEST_USAGE_ERROR)
 
+# Synthetic codes for a collector that never ran. Borrowed from the shell
+# conventions (127 = command not found, 124 = timed out) so they read correctly
+# in a CI log and can never collide with a real pytest exit code.
+COLLECTOR_UNAVAILABLE = 127
+COLLECTOR_TIMEOUT = 124
+COLLECTOR_FAILURE_CODES = (COLLECTOR_UNAVAILABLE, COLLECTOR_TIMEOUT)
+
 VERDICT_PASS = "pass"
 VERDICT_DROPPED = "dropped"
 VERDICT_COLLECTION_ERROR = "collection_error"
@@ -94,29 +101,50 @@ def detect_runner(directory) -> list[str]:
     return sorted(runners)
 
 
-def _run(argv: list[str], directory: Path) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        argv, cwd=str(directory), capture_output=True, text=True,
-        timeout=COLLECT_TIMEOUT_SECONDS, check=False,
-    )
+def _run(argv: list[str], directory: Path) -> tuple[int, str, str]:
+    """Run a collector. Returns (returncode, stdout, stderr) and NEVER raises.
+
+    A missing binary (no npx on the runner) or a hung collection would otherwise
+    escape as an exception, skipping _emit() and leaving the workflow's declared
+    outputs unset -- the job would fail with no verdict and no named reason. Both
+    come back as a non-zero code instead, so they land in `collection_error`
+    alongside every other collector failure.
+    """
+    try:
+        proc = subprocess.run(
+            argv, cwd=str(directory), capture_output=True, text=True,
+            timeout=COLLECT_TIMEOUT_SECONDS, check=False,
+        )
+        return proc.returncode, proc.stdout, proc.stderr
+    except FileNotFoundError as exc:
+        return COLLECTOR_UNAVAILABLE, "", f"FileNotFoundError: {exc} (is `{argv[0]}` installed on the runner?)"
+    except subprocess.TimeoutExpired:
+        return COLLECTOR_TIMEOUT, "", (
+            f"TimeoutExpired: `{argv[0]}` did not finish collecting within "
+            f"{COLLECT_TIMEOUT_SECONDS}s"
+        )
+    except OSError as exc:
+        return COLLECTOR_UNAVAILABLE, "", f"{type(exc).__name__}: {exc} (could not execute `{argv[0]}`)"
 
 
 def _count_pytest(directory: Path) -> tuple[int, int, str]:
-    proc = _run([sys.executable, "-m", "pytest", "--collect-only", "-q", "."], directory)
-    if proc.returncode in PYTEST_COLLECTION_ERROR_CODES:
+    code, out, err = _run([sys.executable, "-m", "pytest", "--collect-only", "-q", "."], directory)
+    if code in PYTEST_COLLECTION_ERROR_CODES or code in COLLECTOR_FAILURE_CODES:
         # pytest prints collection tracebacks on STDOUT, so surface both streams
         # or the failure reason reaches the log empty.
-        return 0, proc.returncode, (proc.stdout + proc.stderr).strip()
+        return 0, code, (out + err).strip()
     # Exit 5 (no tests collected) is a legitimate count of zero, not a failure.
-    n = sum(1 for line in proc.stdout.splitlines() if "::" in line)
+    n = sum(1 for line in out.splitlines() if "::" in line)
     return n, 0, ""
 
 
 def _count_jest(directory: Path) -> tuple[int, int, str]:
-    proc = _run(["npx", "--no-install", "jest", "--listTests"], directory)
-    if proc.returncode != 0:
-        return 0, proc.returncode, (proc.stderr + proc.stdout).strip()
-    n = sum(1 for line in proc.stdout.splitlines() if line.strip())
+    code, out, err = _run(["npx", "--no-install", "jest", "--listTests"], directory)
+    if code != 0:
+        return 0, code, (err + out).strip()
+    # `--listTests` prints one test FILE per line, so this counts files, not
+    # individual test cases. See the README note.
+    n = sum(1 for line in out.splitlines() if line.strip())
     return n, 0, ""
 
 
