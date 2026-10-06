@@ -238,9 +238,9 @@ def test_changelog_option():
 def test_version_bump_option():
     opts = sc.Options(version_bump=True)
     ctx = make_ctx(); ctx["files"].append("VERSION")
-    versions = {("VERSION", "b" * 40): "1.0.0\n", ("VERSION", HEAD): "1.0.1\n"}
+    versions = {("VERSION", "main"): "1.0.0\n", ("VERSION", HEAD): "1.0.1\n"}
     assert run(ctx, opts, read_file=lambda p, r: versions.get((p, r))) == []
-    same = {("VERSION", "b" * 40): "1.0.0\n", ("VERSION", HEAD): "1.0.0\n"}
+    same = {("VERSION", "main"): "1.0.0\n", ("VERSION", HEAD): "1.0.0\n"}
     assert "version-bump" in checks(run(ctx, opts, read_file=lambda p, r: same.get((p, r))), sc.VIOLATION)
     ctx["files"].remove("VERSION")
     assert "version-bump" in checks(run(ctx, opts, read_file=lambda p, r: versions.get((p, r))), sc.VIOLATION)
@@ -249,7 +249,7 @@ def test_version_bump_option():
 def test_version_bump_ignores_trailing_whitespace_only_changes():
     opts = sc.Options(version_bump=True)
     ctx = make_ctx(); ctx["files"].append("VERSION")
-    ws = {("VERSION", "b" * 40): "1.0.0\n", ("VERSION", HEAD): "1.0.0"}
+    ws = {("VERSION", "main"): "1.0.0\n", ("VERSION", HEAD): "1.0.0"}
     assert "version-bump" in checks(run(ctx, opts, read_file=lambda p, r: ws.get((p, r))), sc.VIOLATION)
 
 
@@ -390,7 +390,7 @@ def test_issue_lookup_403_is_a_checker_error():
 
 def test_parse_pr_ref():
     assert sc.parse_pr_ref("NapticStacks/slack-bot#12") == ("NapticStacks/slack-bot", 12)
-    with pytest.raises(SystemExit):
+    with pytest.raises(ValueError):
         sc.parse_pr_ref("slack-bot 12")
 
 
@@ -487,3 +487,104 @@ def test_fleet_bot_still_needs_an_issue_link():
 def test_verdict_words(mode, levels, expected):
     findings = [sc.Finding("size", lvl, "p", "c", "f") for lvl in levels]
     assert sc.verdict(findings, sc.Options(mode=mode)) == expected
+
+
+# --- three-lens review fixes (.github#7) -------------------------------------------
+
+def test_txt_manifests_are_not_docs():
+    assert not sc.is_docs_path("requirements.txt")
+    assert not sc.is_docs_path("CMakeLists.txt")
+    assert not sc.docs_only(["requirements.txt"])
+    assert sc.is_docs_path("docs/notes.txt")
+
+
+def test_bad_pr_ref_exits_2_not_1(capsys):
+    assert sc.main(["--pr", "slack-bot 12"]) == sc.EXIT_CHECKER_ERROR
+
+
+def test_review_fix_never_suggests_the_author():
+    ctx = make_ctx(user={"login": "maydaycyber"}); ctx["reviews"] = []
+    f = run(ctx, sc.Options(trusted_reviewers=("maydaycyber", "BenBlanke")))[0]
+    assert "--add-reviewer BenBlanke" in f.fix and "maydaycyber" not in f.fix
+
+
+def test_review_when_author_is_the_only_trusted_reviewer():
+    ctx = make_ctx(user={"login": "maydaycyber"}); ctx["reviews"] = []
+    f = run(ctx)[0]
+    assert "--add-reviewer" not in f.fix
+    assert "only trusted reviewer" in f.cause
+
+
+def test_version_bump_message_is_plain_text():
+    ctx = make_ctx()
+    f = [x for x in run(ctx, sc.Options(version_bump=True)) if x.check == "version-bump"][0]
+    assert "None" not in f.problem and "\\n" not in f.problem
+    assert "no VERSION file" in f.problem
+    long = {("VERSION", "main"): "1.0.0\n", ("VERSION", "a" * 40): "x" * 500}
+    ctx["files"].append("VERSION")
+    f = [x for x in run(ctx, sc.Options(version_bump=True), read_file=lambda p, r: long.get((p, r))) if x.check == "version-bump"]
+    assert f == [] or len(f[0].problem) < 200
+
+
+def test_missing_section_cause_names_the_org_template():
+    body = make_ctx()["pr"]["body"].replace("## Issue", "## What")
+    f = [x for x in run(make_ctx(body=body)) if x.check == "template"][0]
+    assert "pull_request_template.md" in f.cause
+
+
+def test_step_summary_carries_the_fix(tmp_path, monkeypatch):
+    out = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(out))
+    sc._print([sc.Finding("size", sc.VIOLATION, "p", "c", "run this")], sc.Options(), False)
+    assert "run this" in out.read_text()
+
+
+def test_gate_ref_must_be_a_gate_tag_or_sha():
+    text = WORKFLOW.read_text()
+    assert "sdlc-conformance-v" in text and "GATE_REF" in text
+
+
+# --- codex round 1 (.github#7) ------------------------------------------------------
+
+def test_version_file_without_inline_content_is_a_checker_error():
+    api = sc.Api("t0ken", FakeTransport({
+        "/repos/NapticStacks/example/contents/VERSION": {"encoding": "none", "content": "", "size": 2_000_000}}))
+    with pytest.raises(sc.CheckerError):
+        sc.read_file_for(api, REPO)("VERSION", "a" * 40)
+
+
+@pytest.mark.parametrize("ref", ["Closes https://github.com/NapticStacks/example/issues/7oops",
+                                 "Closes #7oops", "Closes NapticStacks/example#7x"])
+def test_malformed_refs_are_not_links(ref):
+    assert sc.issue_refs(ref) == []
+
+
+def test_reporting_failure_is_exit_2(monkeypatch, tmp_path):
+    monkeypatch.setattr(sc, "gather", lambda api, repo, n: make_ctx())
+    monkeypatch.setattr(sc, "issue_lookup_for", lambda api, repo: lookup_ok)
+    monkeypatch.setenv("GH_TOKEN", "t0ken")
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "missing-dir" / "summary.md"))
+    assert sc.main(["--pr", "NapticStacks/example#42"]) == sc.EXIT_CHECKER_ERROR
+
+
+
+# --- functionality lens (.github#7) -------------------------------------------------
+
+def test_issue_na_with_reason_is_a_note():
+    body = make_ctx()["pr"]["body"].replace("Closes #7", "N/A because this is a spike with no issue")
+    findings = run(make_ctx(body=body))
+    assert [(f.check, f.level) for f in findings] == [("issue-link", sc.NOTE)]
+
+
+def test_heading_inside_a_code_fence_does_not_split_sections():
+    body = make_ctx()["pr"]["body"].replace(
+        "3 passed in 0.12s", "3 passed in 0.12s\n## Verification evidence\nfake")
+    found = sc.sections(body)
+    assert "3 passed" in found["tests named in the issue"] and "fake" in found["tests named in the issue"]
+
+
+def test_ref_inside_a_code_fence_is_ignored():
+    body = make_ctx()["pr"]["body"].replace("3 passed in 0.12s", "abc123 fixes #3 in the parser")
+    seen = []
+    run(make_ctx(body=body), issue_lookup=lambda n: seen.append(n) or "issue")
+    assert seen == [7]

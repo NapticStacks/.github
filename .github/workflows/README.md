@@ -157,7 +157,11 @@ jobs:
     with: {mode: warn}
 ```
 
-Pin `@sdlc-conformance-v1`, not `@v1`: the gate has its own tag so it can move without moving the shared one. Local pre-push check: `python scripts/sdlc_conformance.py --pr <owner/repo#N>`.
+Pin `@sdlc-conformance-v1`, not `@v1`: the gate has its own tag so it can move without moving the shared one.
+
+**Local pre-push check:** from a clone of `NapticStacks/.github` (Python 3.11+, `gh auth login` done), run `python scripts/sdlc_conformance.py --pr <owner/repo#N>`. It uses the same code path and the same exit codes as CI.
+
+**Before a repo turns on `mode: block`:** on `pull_request`, GitHub reads the caller file from the PR head, so a PR can edit its own `sdlc.yml` (reviewers, mode). Block mode is only a control once that file is protected: CODEOWNERS `@maydaycyber` on `.github/workflows/**` with required code-owner review (or an org required-workflow ruleset), plus a tag-protection ruleset on `sdlc-conformance-v*` here. The gate already refuses a `gate_ref` that isn't an `sdlc-conformance-vN` tag or a full SHA.
 
 ## Rollout discipline
 

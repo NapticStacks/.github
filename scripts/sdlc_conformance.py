@@ -47,10 +47,11 @@ VIOLATION, PENDING, NOTE = "violation", "pending", "note"
 CHECK_IDS = ("draft", "issue-link", "template", "size", "review", "docs-only",
              "unf-phase", "changelog", "version-bump", "phase-09c")
 
+TEMPLATE_URL = "https://github.com/NapticStacks/.github/blob/main/.github/pull_request_template.md"
 SECTIONS = ("Issue", "Tests named in the issue", "Verification evidence", "/review findings")
 TESTS_SECTION = "tests named in the issue"
 DOCS_ONLY_LABEL = "docs-only"
-DOC_SUFFIXES = (".md", ".mdx", ".rst", ".txt")
+DOC_SUFFIXES = (".md", ".mdx", ".rst")  # .txt only under docs/: requirements.txt is code
 DEPENDABOT_LOGINS = ("dependabot[bot]", "app/dependabot")
 
 COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
@@ -62,7 +63,8 @@ NA_DOCS_ONLY_RE = re.compile(r"^n/?a\s*:\s*docs[- ]only", re.I)
 REF_RE = re.compile(
     r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|part of)\s*:?\s+"
     r"(?:https://github\.com/(?P<uo>[\w.-]+)/(?P<ur>[\w.-]+)/issues/(?P<un>\d+)"
-    r"|(?:(?P<o>[\w.-]+)/(?P<r>[\w.-]+))?#(?P<n>\d+))", re.I)
+    r"|(?:(?P<o>[\w.-]+)/(?P<r>[\w.-]+))?#(?P<n>\d+))(?![\w/])", re.I)
+FENCE_RE = re.compile(r"```.*?```", re.S)
 SIZE_JUSTIFICATION_RE = re.compile(r"^size justification:\s*\S", re.I | re.M)
 PHASE_RE = re.compile(r"Phase\s+[0-9]{1,2}[a-z]?")
 INFRA_RE = re.compile(r"^(infra|terraform|cdk)/")
@@ -126,9 +128,11 @@ def docs_only(files: list[str]) -> bool:
 def sections(body: str | None) -> dict[str, str]:
     """{lowercased `## heading`: raw content up to the next `## `}."""
     out: dict[str, str] = {}
-    current, buf = None, []
+    current, buf, in_fence = None, [], False
     for line in (body or "").splitlines():
-        m = HEADING_RE.match(line)
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+        m = None if in_fence else HEADING_RE.match(line)
         if m:
             if current is not None:
                 out[current] = "\n".join(buf)
@@ -147,7 +151,7 @@ def clean(text: str) -> str:
 def issue_refs(body: str | None) -> list[tuple[str, str, int]]:
     """(owner, repo, number) for each closing/part-of ref; owner/repo '' = same repo."""
     refs = []
-    for m in REF_RE.finditer(COMMENT_RE.sub("", body or "")):
+    for m in REF_RE.finditer(FENCE_RE.sub("", COMMENT_RE.sub("", body or ""))):
         if m.group("un"):
             refs.append((m.group("uo"), m.group("ur"), int(m.group("un"))))
         else:
@@ -214,7 +218,7 @@ def check_template(repo, number, body, files) -> list[Finding]:
         key = name.lower()
         if key not in found:
             out.append(Finding("template", VIOLATION, f"Missing section `## {name}`.",
-                               "REVIEW.md's definition of done needs all four org-template sections.",
+                               f"REVIEW.md's definition of done needs all four sections of {TEMPLATE_URL}.",
                                f"Add the section (or `N/A because ...`): {edit}"))
             continue
         content = clean(found[key])
@@ -242,22 +246,28 @@ def check_size(repo, number, pr, body) -> list[Finding]:
                     f"Split the PR, or add a line `Size justification: <why>` to the body: gh pr edit {number} -R {repo}")]
 
 
-def check_review(repo, number, reviews, head_sha, opts) -> list[Finding]:
+def check_review(repo, number, reviews, head_sha, opts, author_login=None) -> list[Finding]:
     state = review_state(reviews, head_sha, opts.trusted_reviewers)
     if state == "valid":
         return []
     level = VIOLATION if (opts.mode == "block" and opts.require_approval) else PENDING
     who = ",".join(opts.trusted_reviewers)
+    author = (author_login or "").lower()
+    others = [t for t in opts.trusted_reviewers if t.lower() != author]
+    if not others:
+        return [Finding("review", level, "Pending review: the author is the only trusted reviewer.",
+                        f"You are the only trusted reviewer ({who}), and GitHub won't let you approve your own PR.",
+                        "Add another reviewer to `trusted_reviewers` in this repo's sdlc.yml, or ask one to review.")]
     problem, cause, fix = {
         "none": ("Pending review: no approval from a trusted reviewer yet.",
                  f"A valid review is an APPROVE from one of: {who}.",
-                 f"Request it: gh pr edit {number} -R {repo} --add-reviewer {opts.trusted_reviewers[0]}"),
+                 f"Request it: gh pr edit {number} -R {repo} --add-reviewer {others[0]}"),
         "stale": ("Pending review: the approval is on an older commit.",
                   "Approvals count only on the current head; a push after approval makes it stale.",
-                  f"Re-request review: gh pr edit {number} -R {repo} --add-reviewer {opts.trusted_reviewers[0]}"),
+                  f"Re-request review: gh pr edit {number} -R {repo} --add-reviewer {others[0]}"),
         "changes_requested": ("Pending review: changes were requested.",
                               "A trusted reviewer's latest review asks for changes.",
-                              f"Address them, push, then re-request: gh pr edit {number} -R {repo} --add-reviewer {opts.trusted_reviewers[0]}"),
+                              f"Address them, push, then re-request: gh pr edit {number} -R {repo} --add-reviewer {others[0]}"),
     }[state]
     return [Finding("review", level, problem, cause, fix)]
 
@@ -283,10 +293,16 @@ def check_options(repo, pr, files, opts, read_file) -> list[Finding]:
                            "This repo records every change in CHANGELOG.md.",
                            "Run gstack /ship (it bumps CHANGELOG and VERSION together), or add an entry by hand."))
     if opts.version_bump:
-        base_v = read_file("VERSION", pr["base"]["sha"])
+        # Base branch tip, not pr.base.sha: matches engineer-pipeline's origin/${BASE_REF}.
+        base_v = read_file("VERSION", pr["base"].get("ref") or pr["base"]["sha"])
         head_v = read_file("VERSION", pr["head"]["sha"])
-        if "VERSION" not in files or (base_v or "").strip() == (head_v or "").strip():
-            out.append(Finding("version-bump", VIOLATION, f"VERSION not bumped (base {base_v!r}, head {head_v!r}).",
+        base_s, head_s = (base_v or "").strip()[:40], (head_v or "").strip()[:40]
+        if head_v is None:
+            out.append(Finding("version-bump", VIOLATION, "There is no VERSION file at the repo root.",
+                               "The version_bump option is on for this repo, but it has no VERSION file.",
+                               "Add a VERSION file, or turn off `version_bump` in the caller's sdlc.yml."))
+        elif "VERSION" not in files or base_s == head_s:
+            out.append(Finding("version-bump", VIOLATION, f"VERSION is not bumped (still `{head_s}`).",
                                "This repo bumps VERSION in every PR.",
                                "Run gstack /ship, or bump VERSION by hand and push."))
     if opts.phase_09c_on_infra and any(INFRA_RE.search(p) or IAM_RE.search(p) for p in files):
@@ -309,6 +325,11 @@ def evaluate(ctx: dict, opts: Options, issue_lookup, read_file) -> list[Finding]
     kind = author_kind((pr.get("user") or {}).get("login"), opts.bot_authors)
     human = kind == "Human"
     out = check_issue_link(repo, number, body, issue_lookup)
+    issue_section = clean(sections(body).get("issue", ""))
+    if NA_REASON_RE.match(issue_section):
+        # REVIEW.md: every item, the issue link included, accepts `N/A because ...`.
+        out = [Finding(f.check, NOTE, f.problem, f"The Issue section says: {issue_section[:80]}", f.fix)
+               if f.check == "issue-link" else f for f in out]
     if kind == "Dependabot":
         # Dependabot can't link an issue; pm-dependabot-auto-merge owns those PRs.
         out = [Finding(f.check, NOTE, f.problem, "Dependabot PRs don't carry issue links.", f.fix)
@@ -317,7 +338,8 @@ def evaluate(ctx: dict, opts: Options, issue_lookup, read_file) -> list[Finding]
         out += check_template(repo, number, body, files)
         out += check_size(repo, number, pr, body)
     out += check_docs_only_label(repo, pr, files)
-    out += check_review(repo, number, ctx["reviews"], pr["head"]["sha"], opts)
+    out += check_review(repo, number, ctx["reviews"], pr["head"]["sha"], opts,
+                        (pr.get("user") or {}).get("login"))
     out += check_options(repo, pr, files, opts, read_file)
     return out
 
@@ -419,6 +441,9 @@ def read_file_for(api: Api, repo: str):
             if e.status == 404:
                 return None
             raise
+        if data.get("encoding") != "base64":
+            raise CheckerError(f"{path} at {ref} came back without inline content "
+                               f"(encoding {data.get('encoding')!r}, size {data.get('size')})")
         return base64.b64decode(data.get("content") or "").decode("utf-8", "replace")
     return read
 
@@ -428,7 +453,7 @@ def read_file_for(api: Api, repo: str):
 def parse_pr_ref(ref: str) -> tuple[str, int]:
     m = re.fullmatch(r"([\w.-]+/[\w.-]+)#(\d+)", ref.strip())
     if not m:
-        raise SystemExit(f"--pr must look like owner/repo#N, got {ref!r}")
+        raise ValueError(f"--pr must look like owner/repo#N, got {ref!r}")
     return m.group(1), int(m.group(2))
 
 
@@ -472,7 +497,7 @@ def _print(findings: list[Finding], opts: Options, in_actions: bool) -> None:
     if path:
         with open(path, "a") as fh:
             fh.write(f"### {summary}\n\n" + "".join(
-                f"- **{f.check}** ({f.level}): {f.problem} [docs]({f.anchor})\n" for f in findings))
+                f"- **{f.check}** ({f.level}): {f.problem} Fix: {f.fix} [docs]({f.anchor})\n" for f in findings))
 
 
 def main(argv=None) -> int:
@@ -491,12 +516,12 @@ def main(argv=None) -> int:
         api = Api(_token())
         ctx = gather(api, repo, number)
         findings = evaluate(ctx, opts, issue_lookup_for(api, repo), read_file_for(api, repo))
+        _print(findings, opts, in_actions)
     except Exception as e:  # noqa: BLE001 -- any failure here is the gate's, never the PR's (E1: exit 2)
         msg = (f"Checker error, gate bug, not your PR: {e}. Re-run the job; if it fails "
                f"again, file it: {GATE_BUG_URL} Docs: {DOCS}#checker-error")
         print(f"::error title=sdlc checker error::{_escape(msg)}" if in_actions else msg)
         return EXIT_CHECKER_ERROR
-    _print(findings, opts, in_actions)
     return exit_code(findings, opts)
 
 

@@ -43,9 +43,9 @@ on:
         type: string
         default: "maydaycyber"
       bot_authors:
-        description: "Comma-separated extra bot logins (mirror of project-manager pm_config.json engineering_board.bot_authors)."
+        description: "Comma-separated extra bot logins. Keep in sync with project-manager config/pm_config.json engineering_board.bot_authors (Dependabot is always recognized)."
         type: string
-        default: "naptic-hp-agent[bot],naptic-imac-agent[bot],naptic-dell-agent[bot],dependabot[bot]"
+        default: "naptic-hp-agent[bot],naptic-imac-agent[bot],naptic-dell-agent[bot]"
       unf_phase:
         type: boolean
         default: false
@@ -74,6 +74,17 @@ jobs:
     if: ${{ github.event.pull_request != null }}
     runs-on: ubuntu-latest
     steps:
+      # gate_ref must be a gate tag or a full SHA: a PR that edits its own caller
+      # must not be able to point the gate at an arbitrary branch.
+      - name: Validate gate_ref
+        env:
+          GATE_REF: ${{ inputs.gate_ref }}
+        run: |
+          if ! [[ "$GATE_REF" =~ ^sdlc-conformance-v[0-9]+$ || "$GATE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error title=sdlc checker error::gate_ref must be an sdlc-conformance-vN tag or a 40-char SHA, got: $GATE_REF"
+            exit 2
+          fi
+
       - name: Check out the gate script (not the PR)
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:

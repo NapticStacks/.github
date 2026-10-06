@@ -3,9 +3,16 @@
   "draft": false,
   "title": "feat(example): add the widget endpoint",
   "body": "## Issue\nCloses #7\n\n## Tests named in the issue\n```\npytest tests/test_widget.py -q\n3 passed in 0.12s\n```\n\n## Verification evidence\n```\n$ curl -s localhost:8000/widget\n{\"ok\": true}\n```\n\n## /review findings\nNo findings.\n",
-  "user": {"login": "example-dev"},
-  "head": {"sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-  "base": {"sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+  "user": {
+    "login": "example-dev"
+  },
+  "head": {
+    "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "base": {
+    "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "ref": "main"
+  },
   "additions": 120,
   "deletions": 30,
   "changed_files": 2,
