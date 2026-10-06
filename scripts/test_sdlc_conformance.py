@@ -314,3 +314,120 @@ def test_injection_body_is_inert(tmp_path):
     body = make_ctx()["pr"]["body"] + f"\n$(touch {canary}) `touch {canary}`\n"
     run(make_ctx(body=body))
     assert not canary.exists()
+
+
+# --- API + gather (E-3/E-4, error rows) --------------------------------------------
+
+class FakeTransport:
+    """url -> payload, or an int status to raise. Records every URL fetched."""
+    def __init__(self, routes):
+        self.routes, self.seen = routes, []
+
+    def __call__(self, url, headers):
+        self.seen.append(url)
+        assert url.startswith("https://"), url
+        assert headers["Authorization"] == "Bearer t0ken"
+        for prefix, payload in self.routes.items():
+            if url.startswith(sc.API + prefix):
+                if isinstance(payload, int):
+                    raise sc.ApiError(payload, url)
+                return payload(url) if callable(payload) else payload
+        raise sc.ApiError(404, url)
+
+
+def paged(items):
+    def handler(url):
+        q = dict(p.split("=") for p in url.split("?", 1)[1].split("&"))
+        page, per = int(q["page"]), int(q["per_page"])
+        return items[(page - 1) * per: page * per]
+    return handler
+
+
+def pr_routes(n_files=2, pr_extra=None):
+    pr = json.loads((FIXTURES / "pr_good.json").read_text())
+    pr.update(changed_files=n_files, **(pr_extra or {}))
+    files = [{"filename": f"docs/page{i}.md"} for i in range(n_files)]
+    return {"/repos/NapticStacks/example/pulls/42/files": paged(files),
+            "/repos/NapticStacks/example/pulls/42/reviews": paged([approve("maydaycyber", HEAD)]),
+            "/repos/NapticStacks/example/pulls/42": pr}
+
+
+def test_gather_pages_through_150_files():
+    transport = FakeTransport(pr_routes(n_files=150))
+    ctx = sc.gather(sc.Api("t0ken", transport), REPO, 42)
+    assert len(ctx["files"]) == 150
+    assert sum("/files?" in u for u in transport.seen) == 2
+
+
+def test_truncated_listing_is_a_checker_error():
+    routes = pr_routes(n_files=150)
+    routes["/repos/NapticStacks/example/pulls/42"] = dict(routes["/repos/NapticStacks/example/pulls/42"], changed_files=3001)
+    with pytest.raises(sc.CheckerError, match="truncated"):
+        sc.gather(sc.Api("t0ken", FakeTransport(routes)), REPO, 42)
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 429])
+def test_api_failure_reading_the_pr_is_a_checker_error(status):
+    api = sc.Api("t0ken", FakeTransport({"/repos/NapticStacks/example/pulls/42": status}))
+    with pytest.raises(sc.CheckerError):
+        sc.gather(api, REPO, 42)
+
+
+def test_issue_lookup_maps_404_to_none_and_prs_to_pr():
+    api = sc.Api("t0ken", FakeTransport({
+        "/repos/NapticStacks/example/issues/7": {"number": 7},
+        "/repos/NapticStacks/example/issues/8": {"number": 8, "pull_request": {}},
+    }))
+    lookup = sc.issue_lookup_for(api, REPO)
+    assert (lookup(7), lookup(8), lookup(9)) == ("issue", "pr", None)
+
+
+def test_issue_lookup_403_is_a_checker_error():
+    api = sc.Api("t0ken", FakeTransport({"/repos/NapticStacks/example/issues/7": 403}))
+    with pytest.raises(sc.CheckerError):
+        sc.issue_lookup_for(api, REPO)(7)
+
+
+def test_parse_pr_ref():
+    assert sc.parse_pr_ref("NapticStacks/slack-bot#12") == ("NapticStacks/slack-bot", 12)
+    with pytest.raises(SystemExit):
+        sc.parse_pr_ref("slack-bot 12")
+
+
+def test_main_exit_2_on_checker_error(monkeypatch, capsys):
+    def boom(*a, **k):
+        raise sc.CheckerError("could not read the PR (HTTP 403)")
+    monkeypatch.setattr(sc, "gather", boom)
+    monkeypatch.setenv("GH_TOKEN", "t0ken")
+    assert sc.main(["--pr", "NapticStacks/example#42", "--mode", "warn"]) == sc.EXIT_CHECKER_ERROR
+    out = capsys.readouterr().out
+    assert "gate bug, not your PR" in out and sc.GATE_BUG_URL in out
+
+
+def test_main_block_mode_returns_1(monkeypatch, capsys):
+    ctx = make_ctx(additions=5000)
+    monkeypatch.setattr(sc, "gather", lambda api, repo, n: ctx)
+    monkeypatch.setattr(sc, "issue_lookup_for", lambda api, repo: lookup_ok)
+    monkeypatch.setenv("GH_TOKEN", "t0ken")
+    assert sc.main(["--pr", "NapticStacks/example#42", "--mode", "block"]) == sc.EXIT_VIOLATIONS
+    assert sc.main(["--pr", "NapticStacks/example#42", "--mode", "warn"]) == sc.EXIT_OK
+
+
+def test_main_reads_repo_and_number_from_env(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(sc, "gather", lambda api, repo, n: seen.update(repo=repo, n=n) or make_ctx())
+    monkeypatch.setattr(sc, "issue_lookup_for", lambda api, repo: lookup_ok)
+    monkeypatch.setenv("GH_TOKEN", "t0ken")
+    monkeypatch.setenv("SDLC_REPO", "NapticStacks/example")
+    monkeypatch.setenv("SDLC_PR", "42")
+    assert sc.main([]) == sc.EXIT_OK
+    assert seen == {"repo": "NapticStacks/example", "n": 42}
+
+
+def test_main_unexpected_exception_is_exit_2_not_1(monkeypatch, capsys):
+    def boom(*a, **k):
+        raise TypeError("unexpected payload shape")
+    monkeypatch.setattr(sc, "gather", boom)
+    monkeypatch.setenv("GH_TOKEN", "t0ken")
+    assert sc.main(["--pr", "NapticStacks/example#42", "--mode", "block"]) == sc.EXIT_CHECKER_ERROR
+    assert "gate bug, not your PR" in capsys.readouterr().out

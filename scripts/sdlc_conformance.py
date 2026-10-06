@@ -331,3 +331,162 @@ def annotation(f: Finding, mode: str) -> str:
     kind = "notice" if f.level != VIOLATION else ("error" if mode == "block" else "warning")
     msg = f"{f.problem} Cause: {f.cause} Fix: {f.fix} Docs: {f.anchor}"
     return f"::{kind} title=sdlc {f.check}::{_escape(msg)}"
+
+
+# --- network --------------------------------------------------------------------------
+
+class ApiError(CheckerError):
+    def __init__(self, status: int, url: str):
+        super().__init__(f"GitHub API returned HTTP {status} for {url}")
+        self.status = status
+
+
+def _urllib_fetch(url: str, headers: dict):
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as e:
+        raise ApiError(e.code, url) from e
+    except (urllib.error.URLError, TimeoutError) as e:
+        raise CheckerError(f"could not reach the GitHub API ({url}): {e}") from e
+
+
+class Api:
+    """Read-only GitHub REST client. `fetch(url, headers)` is injectable for tests."""
+
+    def __init__(self, token: str, fetch=None):
+        self.token, self.fetch = token, fetch or _urllib_fetch
+
+    def get(self, path: str, params: dict | None = None):
+        url = API + path + ("?" + urllib.parse.urlencode(params) if params else "")
+        return self.fetch(url, {"Authorization": f"Bearer {self.token}",
+                                "Accept": "application/vnd.github+json",
+                                "X-GitHub-Api-Version": "2022-11-28",
+                                "User-Agent": "naptic-sdlc-conformance"})
+
+    def paged(self, path: str) -> list:
+        items, page = [], 1
+        while True:
+            batch = self.get(path, {"per_page": PER_PAGE, "page": page})
+            items.extend(batch)
+            if len(batch) < PER_PAGE:
+                return items
+            page += 1
+
+
+def gather(api: Api, repo: str, number: int) -> dict:
+    pr = api.get(f"/repos/{repo}/pulls/{number}")
+    files = [f["filename"] for f in api.paged(f"/repos/{repo}/pulls/{number}/files")]
+    if len(files) != pr.get("changed_files"):
+        raise CheckerError(f"the file listing returned {len(files)} of {pr.get('changed_files')} "
+                           "changed files (truncated), so docs-only can't be decided")
+    reviews = api.paged(f"/repos/{repo}/pulls/{number}/reviews")
+    return {"repo": repo, "pr": pr, "files": files, "reviews": reviews}
+
+
+def issue_lookup_for(api: Api, repo: str):
+    def lookup(n: int):
+        try:
+            issue = api.get(f"/repos/{repo}/issues/{n}")
+        except ApiError as e:
+            if e.status == 404:
+                return None
+            raise
+        return "pr" if "pull_request" in issue else "issue"
+    return lookup
+
+
+def read_file_for(api: Api, repo: str):
+    def read(path: str, ref: str):
+        try:
+            data = api.get(f"/repos/{repo}/contents/{path}", {"ref": ref})
+        except ApiError as e:
+            if e.status == 404:
+                return None
+            raise
+        return base64.b64decode(data.get("content") or "").decode("utf-8", "replace")
+    return read
+
+
+# --- CLI -------------------------------------------------------------------------------
+
+def parse_pr_ref(ref: str) -> tuple[str, int]:
+    m = re.fullmatch(r"([\w.-]+/[\w.-]+)#(\d+)", ref.strip())
+    if not m:
+        raise SystemExit(f"--pr must look like owner/repo#N, got {ref!r}")
+    return m.group(1), int(m.group(2))
+
+
+def _token() -> str:
+    tok = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if tok:
+        return tok
+    try:
+        return subprocess.run(["gh", "auth", "token"], capture_output=True, text=True,
+                              check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as e:
+        raise CheckerError("no token: set GH_TOKEN or run `gh auth login`") from e
+
+
+def _csv(value: str) -> tuple:
+    return tuple(v.strip() for v in (value or "").split(",") if v.strip())
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Check a PR against the NapticStacks SDLC gate.")
+    p.add_argument("--pr", help="owner/repo#N (local mode). In Actions, SDLC_REPO + SDLC_PR are used.")
+    p.add_argument("--mode", choices=("warn", "block"), default="warn")
+    p.add_argument("--require-approval", action="store_true")
+    p.add_argument("--trusted-reviewers", default="maydaycyber")
+    p.add_argument("--bot-authors", default="")
+    for flag in ("unf-phase", "changelog", "version-bump", "phase-09c-on-infra"):
+        p.add_argument(f"--{flag}", action="store_true")
+    return p
+
+
+def _print(findings: list[Finding], opts: Options, in_actions: bool) -> None:
+    for f in findings:
+        if in_actions:
+            print(annotation(f, opts.mode))
+        else:
+            print(f"[{f.level}] {f.check}: {f.problem}\n  cause: {f.cause}\n  fix:   {f.fix}\n  docs:  {f.anchor}")
+    violations = sum(f.level == VIOLATION for f in findings)
+    pending = any(f.level == PENDING for f in findings)
+    verdict = "fail" if exit_code(findings, opts) else ("pending" if pending else "pass")
+    summary = f"sdlc-conformance ({opts.mode}): {verdict}, {violations} violation(s)."
+    print(summary)
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if path:
+        with open(path, "a") as fh:
+            fh.write(f"### {summary}\n\n" + "".join(
+                f"- **{f.check}** ({f.level}): {f.problem} [docs]({f.anchor})\n" for f in findings))
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    opts = Options(mode=args.mode, require_approval=args.require_approval,
+                   trusted_reviewers=_csv(args.trusted_reviewers) or ("maydaycyber",),
+                   bot_authors=_csv(args.bot_authors), unf_phase=args.unf_phase,
+                   changelog=args.changelog, version_bump=args.version_bump,
+                   phase_09c_on_infra=args.phase_09c_on_infra)
+    in_actions = os.environ.get("GITHUB_ACTIONS") == "true"
+    try:
+        if args.pr:
+            repo, number = parse_pr_ref(args.pr)
+        else:
+            repo, number = os.environ["SDLC_REPO"], int(os.environ["SDLC_PR"])
+        api = Api(_token())
+        ctx = gather(api, repo, number)
+        findings = evaluate(ctx, opts, issue_lookup_for(api, repo), read_file_for(api, repo))
+    except Exception as e:  # noqa: BLE001 -- any failure here is the gate's, never the PR's (E1: exit 2)
+        msg = (f"Checker error, gate bug, not your PR: {e}. Re-run the job; if it fails "
+               f"again, file it: {GATE_BUG_URL} Docs: {DOCS}#checker-error")
+        print(f"::error title=sdlc checker error::{_escape(msg)}" if in_actions else msg)
+        return EXIT_CHECKER_ERROR
+    _print(findings, opts, in_actions)
+    return exit_code(findings, opts)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
