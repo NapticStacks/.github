@@ -306,7 +306,8 @@ def check_docs_only_label(repo, pr, files) -> list[Finding]:
     return []
 
 
-def check_options(repo, pr, files, opts, read_file) -> list[Finding]:
+def check_options(repo, pr, files, opts, read_file, present=None) -> list[Finding]:
+    present = files if present is None else present
     out, n, body = [], pr["number"], pr.get("body") or ""
     if opts.unf_phase and not (PHASE_RE.search(pr.get("title") or "") or PHASE_RE.search(body)):
         out.append(Finding("unf-phase", VIOLATION, "No UNF phase reference in the title or body.",
@@ -330,7 +331,8 @@ def check_options(repo, pr, files, opts, read_file) -> list[Finding]:
                                "This repo bumps VERSION in every PR.",
                                "Run gstack /ship, or bump VERSION by hand and push."))
     if opts.phase_09c_on_infra and any(INFRA_RE.search(p) or IAM_RE.search(p) for p in files):
-        if not (any(READINESS_FILE_RE.search(p) for p in files) or "Phase 09c readiness:" in body):
+        # Evidence must exist at head: a deleted or renamed-away readiness file doesn't count.
+        if not (any(READINESS_FILE_RE.search(p) for p in present) or "Phase 09c readiness:" in body):
             out.append(Finding("phase-09c", VIOLATION, "Infra or IAM change without Phase 09c readiness.",
                                "Changes under infra/, terraform/, cdk/ or IAM paths need a readiness checklist.",
                                "Add a `**/09c-readiness*.md` file, or a `Phase 09c readiness:` header with a checklist in the body."))
@@ -364,7 +366,7 @@ def evaluate(ctx: dict, opts: Options, issue_lookup, read_file) -> list[Finding]
     out += check_docs_only_label(repo, pr, files)
     out += check_review(repo, number, ctx["reviews"], pr["head"]["sha"], opts,
                         (pr.get("user") or {}).get("login"))
-    out += check_options(repo, pr, files, opts, read_file)
+    out += check_options(repo, pr, files, opts, read_file, ctx.get("present"))
     return out
 
 
@@ -442,13 +444,15 @@ def gather(api: Api, repo: str, number: int) -> dict:
         raise CheckerError(f"the file listing returned {len(entries)} of {pr.get('changed_files')} "
                            "changed files (truncated), so docs-only can't be decided")
     # A rename touches both paths: terraform/x.tf -> docs/x.tf is not a docs-only change.
-    files = []
+    files, present = [], []
     for e in entries:
+        if e.get("status") != "removed":
+            present.append(e["filename"])
         files.append(e["filename"])
         if e.get("previous_filename") and e["previous_filename"] != e["filename"]:
             files.append(e["previous_filename"])
     reviews = api.paged(f"/repos/{repo}/pulls/{number}/reviews")
-    return {"repo": repo, "pr": pr, "files": files, "reviews": reviews}
+    return {"repo": repo, "pr": pr, "files": files, "present": present, "reviews": reviews}
 
 
 def issue_lookup_for(api: Api, repo: str):

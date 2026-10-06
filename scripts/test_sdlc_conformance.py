@@ -622,3 +622,19 @@ def test_renames_count_both_paths():
     ctx = sc.gather(sc.Api("t0ken", FakeTransport(routes)), REPO, 42)
     assert sorted(ctx["files"]) == ["docs/main.tf", "terraform/main.tf"]
     assert not sc.docs_only(ctx["files"])
+
+
+def test_deleted_readiness_file_is_not_evidence():
+    opts = sc.Options(phase_09c_on_infra=True)
+    ctx = make_ctx(); ctx["files"] += ["terraform/main.tf", "docs/09c-readiness-old.md"]
+    ctx["present"] = [p for p in ctx["files"] if p != "docs/09c-readiness-old.md"]
+    assert "phase-09c" in checks(run(ctx, opts), sc.VIOLATION)
+
+
+def test_gather_marks_removed_files_absent():
+    routes = pr_routes(n_files=2)
+    routes["/repos/NapticStacks/example/pulls/42/files"] = paged(
+        [{"filename": "terraform/main.tf", "status": "modified"},
+         {"filename": "docs/09c-readiness-old.md", "status": "removed"}])
+    ctx = sc.gather(sc.Api("t0ken", FakeTransport(routes)), REPO, 42)
+    assert ctx["present"] == ["terraform/main.tf"]
