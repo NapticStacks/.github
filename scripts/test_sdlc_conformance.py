@@ -461,3 +461,29 @@ def test_workflow_defaults_to_its_own_tag_and_job_name():
     text = WORKFLOW.read_text()
     assert "default: sdlc-conformance-v1" in text
     assert "name: sdlc-conformance" in text
+
+
+# --- review follow-ups ------------------------------------------------------------
+
+def test_dependabot_missing_issue_link_is_a_note_not_a_violation():
+    ctx = make_ctx(body="Bumps foo from 1.0 to 1.1.", user={"login": "dependabot[bot]"})
+    findings = run(ctx, sc.Options(mode="block"))
+    assert [(f.check, f.level) for f in findings] == [("issue-link", sc.NOTE)]
+    assert sc.exit_code(findings, sc.Options(mode="block")) == sc.EXIT_OK
+
+
+def test_fleet_bot_still_needs_an_issue_link():
+    ctx = make_ctx(body="no link", user={"login": "naptic-hp-agent[bot]"})
+    assert "issue-link" in checks(run(ctx), sc.VIOLATION)
+
+
+@pytest.mark.parametrize("mode,levels,expected", [
+    ("warn", [sc.VIOLATION, sc.PENDING], "warnings"),
+    ("block", [sc.VIOLATION], "fail"),
+    ("warn", [sc.PENDING], "pending"),
+    ("warn", [sc.NOTE], "pass"),
+    ("warn", [], "pass"),
+])
+def test_verdict_words(mode, levels, expected):
+    findings = [sc.Finding("size", lvl, "p", "c", "f") for lvl in levels]
+    assert sc.verdict(findings, sc.Options(mode=mode)) == expected

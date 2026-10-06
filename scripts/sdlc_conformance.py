@@ -306,8 +306,13 @@ def evaluate(ctx: dict, opts: Options, issue_lookup, read_file) -> list[Finding]
         return [Finding("draft", NOTE, "Draft PR: checks skipped.",
                         "Drafts aren't ready for review.",
                         f"Mark it ready when it is: gh pr ready {number} -R {repo}")]
-    human = author_kind((pr.get("user") or {}).get("login"), opts.bot_authors) == "Human"
+    kind = author_kind((pr.get("user") or {}).get("login"), opts.bot_authors)
+    human = kind == "Human"
     out = check_issue_link(repo, number, body, issue_lookup)
+    if kind == "Dependabot":
+        # Dependabot can't link an issue; pm-dependabot-auto-merge owns those PRs.
+        out = [Finding(f.check, NOTE, f.problem, "Dependabot PRs don't carry issue links.", f.fix)
+               if f.check == "issue-link" else f for f in out]
     if human:
         out += check_template(repo, number, body, files)
         out += check_size(repo, number, pr, body)
@@ -315,6 +320,15 @@ def evaluate(ctx: dict, opts: Options, issue_lookup, read_file) -> list[Finding]
     out += check_review(repo, number, ctx["reviews"], pr["head"]["sha"], opts)
     out += check_options(repo, pr, files, opts, read_file)
     return out
+
+
+def verdict(findings: list[Finding], opts: Options) -> str:
+    """fail | warnings | pending | pass -- the one word the summary line leads with."""
+    if exit_code(findings, opts):
+        return "fail"
+    if any(f.level == VIOLATION for f in findings):
+        return "warnings"
+    return "pending" if any(f.level == PENDING for f in findings) else "pass"
 
 
 def exit_code(findings: list[Finding], opts: Options) -> int:
@@ -452,9 +466,7 @@ def _print(findings: list[Finding], opts: Options, in_actions: bool) -> None:
         else:
             print(f"[{f.level}] {f.check}: {f.problem}\n  cause: {f.cause}\n  fix:   {f.fix}\n  docs:  {f.anchor}")
     violations = sum(f.level == VIOLATION for f in findings)
-    pending = any(f.level == PENDING for f in findings)
-    verdict = "fail" if exit_code(findings, opts) else ("pending" if pending else "pass")
-    summary = f"sdlc-conformance ({opts.mode}): {verdict}, {violations} violation(s)."
+    summary = f"sdlc-conformance ({opts.mode}): {verdict(findings, opts)}, {violations} violation(s)."
     print(summary)
     path = os.environ.get("GITHUB_STEP_SUMMARY")
     if path:
