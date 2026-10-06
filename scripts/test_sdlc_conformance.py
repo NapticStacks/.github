@@ -588,3 +588,23 @@ def test_ref_inside_a_code_fence_is_ignored():
     seen = []
     run(make_ctx(body=body), issue_lookup=lambda n: seen.append(n) or "issue")
     assert seen == [7]
+
+
+# --- codex round 2 (.github#7) ------------------------------------------------------
+
+def test_inline_triple_backtick_span_does_not_open_a_fence():
+    body = make_ctx()["pr"]["body"].replace(
+        "```\npytest tests/test_widget.py -q\n3 passed in 0.12s\n```", "```pytest tests/test_widget.py``` 3 passed")
+    assert run(make_ctx(body=body)) == []
+
+
+def test_four_backtick_fence_holding_three_backticks():
+    body = "````markdown\n```\n````\n" + make_ctx()["pr"]["body"]
+    assert [n for _, _, n in sc.issue_refs(body)] == [7]
+    assert "verification evidence" in sc.sections(body)
+
+
+def test_version_compare_uses_full_values():
+    ctx = make_ctx(); ctx["files"].append("VERSION")
+    v = {("VERSION", "main"): "1.0.0+" + "a" * 34 + "1", ("VERSION", "a" * 40): "1.0.0+" + "a" * 34 + "2"}
+    assert run(ctx, sc.Options(version_bump=True), read_file=lambda p, r: v.get((p, r))) == []

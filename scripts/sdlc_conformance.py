@@ -64,7 +64,7 @@ REF_RE = re.compile(
     r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|part of)\s*:?\s+"
     r"(?:https://github\.com/(?P<uo>[\w.-]+)/(?P<ur>[\w.-]+)/issues/(?P<un>\d+)"
     r"|(?:(?P<o>[\w.-]+)/(?P<r>[\w.-]+))?#(?P<n>\d+))(?![\w/])", re.I)
-FENCE_RE = re.compile(r"```.*?```", re.S)
+FENCE_LINE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 SIZE_JUSTIFICATION_RE = re.compile(r"^size justification:\s*\S", re.I | re.M)
 PHASE_RE = re.compile(r"Phase\s+[0-9]{1,2}[a-z]?")
 INFRA_RE = re.compile(r"^(infra|terraform|cdk)/")
@@ -125,14 +125,36 @@ def docs_only(files: list[str]) -> bool:
     return bool(files) and all(is_docs_path(p) for p in files)
 
 
+def fence_mask(lines: list[str]) -> list[bool]:
+    """True for each line that opens, sits inside, or closes a fenced code block.
+
+    CommonMark rules that matter here: a fence is 3+ backticks or tildes; a backtick
+    fence's info string can't contain a backtick (so ```x``` is an inline span); it
+    closes only on a line of the same char, at least as long, with nothing after it.
+    """
+    out, fence = [], None
+    for line in lines:
+        m = FENCE_LINE_RE.match(line)
+        if fence is None:
+            if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+                fence = m.group(1)
+                out.append(True)
+            else:
+                out.append(False)
+        else:
+            out.append(True)
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not m.group(2).strip():
+                fence = None
+    return out
+
+
 def sections(body: str | None) -> dict[str, str]:
     """{lowercased `## heading`: raw content up to the next `## `}."""
     out: dict[str, str] = {}
-    current, buf, in_fence = None, [], False
-    for line in (body or "").splitlines():
-        if line.lstrip().startswith("```"):
-            in_fence = not in_fence
-        m = None if in_fence else HEADING_RE.match(line)
+    current, buf = None, []
+    lines = (body or "").splitlines()
+    for line, fenced in zip(lines, fence_mask(lines)):
+        m = None if fenced else HEADING_RE.match(line)
         if m:
             if current is not None:
                 out[current] = "\n".join(buf)
@@ -151,7 +173,9 @@ def clean(text: str) -> str:
 def issue_refs(body: str | None) -> list[tuple[str, str, int]]:
     """(owner, repo, number) for each closing/part-of ref; owner/repo '' = same repo."""
     refs = []
-    for m in REF_RE.finditer(FENCE_RE.sub("", COMMENT_RE.sub("", body or ""))):
+    lines = COMMENT_RE.sub("", body or "").splitlines()
+    prose = "\n".join(l for l, fenced in zip(lines, fence_mask(lines)) if not fenced)
+    for m in REF_RE.finditer(prose):
         if m.group("un"):
             refs.append((m.group("uo"), m.group("ur"), int(m.group("un"))))
         else:
@@ -296,13 +320,13 @@ def check_options(repo, pr, files, opts, read_file) -> list[Finding]:
         # Base branch tip, not pr.base.sha: matches engineer-pipeline's origin/${BASE_REF}.
         base_v = read_file("VERSION", pr["base"].get("ref") or pr["base"]["sha"])
         head_v = read_file("VERSION", pr["head"]["sha"])
-        base_s, head_s = (base_v or "").strip()[:40], (head_v or "").strip()[:40]
+        base_s, head_s = (base_v or "").strip(), (head_v or "").strip()
         if head_v is None:
             out.append(Finding("version-bump", VIOLATION, "There is no VERSION file at the repo root.",
                                "The version_bump option is on for this repo, but it has no VERSION file.",
                                "Add a VERSION file, or turn off `version_bump` in the caller's sdlc.yml."))
         elif "VERSION" not in files or base_s == head_s:
-            out.append(Finding("version-bump", VIOLATION, f"VERSION is not bumped (still `{head_s}`).",
+            out.append(Finding("version-bump", VIOLATION, f"VERSION is not bumped (still `{head_s[:40]}`).",
                                "This repo bumps VERSION in every PR.",
                                "Run gstack /ship, or bump VERSION by hand and push."))
     if opts.phase_09c_on_infra and any(INFRA_RE.search(p) or IAM_RE.search(p) for p in files):
