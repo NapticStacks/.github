@@ -608,3 +608,8 @@ def test_version_compare_uses_full_values():
     ctx = make_ctx(); ctx["files"].append("VERSION")
     v = {("VERSION", "main"): "1.0.0+" + "a" * 34 + "1", ("VERSION", "a" * 40): "1.0.0+" + "a" * 34 + "2"}
     assert run(ctx, sc.Options(version_bump=True), read_file=lambda p, r: v.get((p, r))) == []
+
+
+@pytest.mark.parametrize("block", ["> ```text\n> Closes #999\n> ```", "- step\n    ```text\n    Closes #999\n    ```"])
+def test_fences_in_blockquotes_and_lists_hide_refs(block):
+    assert [n for _, _, n in sc.issue_refs(block + "\n\nCloses #7\n")] == [7]

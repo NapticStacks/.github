@@ -64,7 +64,7 @@ REF_RE = re.compile(
     r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|part of)\s*:?\s+"
     r"(?:https://github\.com/(?P<uo>[\w.-]+)/(?P<ur>[\w.-]+)/issues/(?P<un>\d+)"
     r"|(?:(?P<o>[\w.-]+)/(?P<r>[\w.-]+))?#(?P<n>\d+))(?![\w/])", re.I)
-FENCE_LINE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+FENCE_LINE_RE = re.compile(r"^(?:\s*>)*\s*(`{3,}|~{3,})(.*)$")  # blockquote/list-nested fences too
 SIZE_JUSTIFICATION_RE = re.compile(r"^size justification:\s*\S", re.I | re.M)
 PHASE_RE = re.compile(r"Phase\s+[0-9]{1,2}[a-z]?")
 INFRA_RE = re.compile(r"^(infra|terraform|cdk)/")
