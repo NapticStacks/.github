@@ -1,0 +1,114 @@
+# Reusable SDLC conformance gate for NapticStacks repos.
+#
+# Checks a PR against docs/REVIEW.md's definition of done (NapticStacks/project-manager)
+# and the naptic-sdlc gate catalog. Call it with the caller job-id `sdlc` so the
+# emitted check context is deterministic:
+#   sdlc / sdlc-conformance
+#
+# Caller template (copy as .github/workflows/sdlc.yml):
+#   on:
+#     pull_request:
+#       types: [opened, edited, synchronize, reopened, ready_for_review, labeled, unlabeled]
+#     pull_request_review:
+#       types: [submitted, dismissed]
+#   permissions: {contents: read, pull-requests: read, issues: read}
+#   concurrency: {group: sdlc-${{ github.event.pull_request.number }}, cancel-in-progress: true}
+#   jobs:
+#     sdlc:
+#       uses: NapticStacks/.github/.github/workflows/reusable-sdlc-conformance.yml@sdlc-conformance-v1
+#       with: {mode: warn}
+#
+# SAFETY: no PR code is checked out, and the PR title/body never reach a shell --
+# the script reads them from the API. Only the repo name and PR number cross into
+# env. No secrets are requested; the caller's read-only GITHUB_TOKEN is enough.
+# Exit 2 (checker error) is red in any mode and says "gate bug, not your PR".
+#
+# All `uses:` are pinned to immutable commit SHAs. Bump only via a reviewed PR.
+
+name: Reusable SDLC Conformance
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "warn (annotate, never fail on violations) or block (violations fail the check)."
+        type: string
+        default: "warn"
+      require_approval:
+        description: "Block mode only: a missing or stale valid review fails instead of reading pending."
+        type: boolean
+        default: false
+      trusted_reviewers:
+        description: "Comma-separated logins whose APPROVE on the current head is a valid review."
+        type: string
+        default: "maydaycyber"
+      bot_authors:
+        description: "Comma-separated extra bot logins (mirror of project-manager pm_config.json engineering_board.bot_authors)."
+        type: string
+        default: "naptic-hp-agent[bot],naptic-imac-agent[bot],naptic-dell-agent[bot],dependabot[bot]"
+      unf_phase:
+        type: boolean
+        default: false
+      changelog:
+        type: boolean
+        default: false
+      version_bump:
+        type: boolean
+        default: false
+      phase_09c_on_infra:
+        type: boolean
+        default: false
+      gate_ref:
+        description: "Ref of NapticStacks/.github to load scripts/sdlc_conformance.py from. Keep in step with the caller's @ref."
+        type: string
+        default: sdlc-conformance-v1
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+jobs:
+  sdlc-conformance:
+    name: sdlc-conformance
+    if: ${{ github.event.pull_request != null }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the gate script (not the PR)
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          repository: NapticStacks/.github
+          ref: ${{ inputs.gate_ref }}
+          path: gate
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Run the gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SDLC_REPO: ${{ github.repository }}
+          SDLC_PR: ${{ github.event.pull_request.number }}
+          MODE: ${{ inputs.mode }}
+          REQUIRE_APPROVAL: ${{ inputs.require_approval }}
+          TRUSTED: ${{ inputs.trusted_reviewers }}
+          BOTS: ${{ inputs.bot_authors }}
+          OPT_UNF: ${{ inputs.unf_phase }}
+          OPT_CHANGELOG: ${{ inputs.changelog }}
+          OPT_VERSION: ${{ inputs.version_bump }}
+          OPT_09C: ${{ inputs.phase_09c_on_infra }}
+        run: |
+          set -euo pipefail
+          FLAGS=()
+          [ "$REQUIRE_APPROVAL" = "true" ] && FLAGS+=(--require-approval)
+          [ "$OPT_UNF" = "true" ] && FLAGS+=(--unf-phase)
+          [ "$OPT_CHANGELOG" = "true" ] && FLAGS+=(--changelog)
+          [ "$OPT_VERSION" = "true" ] && FLAGS+=(--version-bump)
+          [ "$OPT_09C" = "true" ] && FLAGS+=(--phase-09c-on-infra)
+          python gate/scripts/sdlc_conformance.py \
+            --mode "$MODE" \
+            --trusted-reviewers "$TRUSTED" \
+            --bot-authors "$BOTS" \
+            "${FLAGS[@]}"

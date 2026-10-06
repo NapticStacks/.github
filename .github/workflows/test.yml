@@ -4,8 +4,11 @@
 # the logic they call lands everywhere at once. `scripts/test_count.py` carries
 # the test-count guard's real logic and is unit-tested by
 # `scripts/test_test_count.py`; this workflow runs those tests on every PR.
+# `scripts/sdlc_conformance.py` (the sdlc gate) is tested by
+# `scripts/test_sdlc_conformance.py`.
 #
-# Only `scripts/test_test_count.py` is collected, never `scripts/fixtures/*` --
+# Only `scripts/test_test_count.py` and `scripts/test_sdlc_conformance.py` are
+# collected, never `scripts/fixtures/*` --
 # the fixtures include a deliberately unimportable suite. `scripts/conftest.py`
 # enforces the same exclusion for anyone running pytest by hand.
 #
@@ -43,4 +46,4 @@ jobs:
         run: npm install --no-audit --no-fund
       - name: pytest
         working-directory: scripts
-        run: python -m pytest test_test_count.py -q
+        run: python -m pytest test_test_count.py test_sdlc_conformance.py -q

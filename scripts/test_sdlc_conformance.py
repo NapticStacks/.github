@@ -431,3 +431,33 @@ def test_main_unexpected_exception_is_exit_2_not_1(monkeypatch, capsys):
     monkeypatch.setenv("GH_TOKEN", "t0ken")
     assert sc.main(["--pr", "NapticStacks/example#42", "--mode", "block"]) == sc.EXIT_CHECKER_ERROR
     assert "gate bug, not your PR" in capsys.readouterr().out
+
+
+# --- workflow contract (S-base, C-1, X5) --------------------------------------------
+
+WORKFLOW = Path(__file__).parent.parent / ".github" / "workflows" / "reusable-sdlc-conformance.yml"
+
+
+def test_workflow_never_reads_pr_text_from_the_event():
+    text = WORKFLOW.read_text()
+    for banned in ("pull_request.body", "pull_request.title", "pull_request_target", "secrets."):
+        assert banned not in text, banned
+
+
+def test_workflow_permissions_are_read_only():
+    text = WORKFLOW.read_text()
+    assert "contents: read" in text and "pull-requests: read" in text and "issues: read" in text
+    assert ": write" not in text
+
+
+def test_workflow_pins_every_action_to_a_sha():
+    for line in WORKFLOW.read_text().splitlines():
+        if "uses:" in line and not line.strip().startswith("#"):
+            ref = line.split("@", 1)[1].split()[0]
+            assert re.fullmatch(r"[0-9a-f]{40}", ref), line
+
+
+def test_workflow_defaults_to_its_own_tag_and_job_name():
+    text = WORKFLOW.read_text()
+    assert "default: sdlc-conformance-v1" in text
+    assert "name: sdlc-conformance" in text

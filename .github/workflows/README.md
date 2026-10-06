@@ -7,7 +7,7 @@ deliberately, not implicitly.
 
 ## Emitted check contexts
 
-Use the caller **job-ids `security`, `ci` and `test-count`** verbatim — the required-status-check
+Use the caller **job-ids `security`, `ci`, `test-count` and `sdlc`** verbatim — the required-status-check
 names in `project-manager` → `config/repo_review_policy.json` are
 `<caller-job-id> / <reusable-job-name>` and must match exactly:
 
@@ -23,6 +23,7 @@ names in `project-manager` → `config/repo_review_policy.json` are
 | `ci / SCA (pip-audit)` | reusable-ci-python | evidence |
 | `ci / SCA (npm-audit)` | reusable-ci-node | gate (Node) |
 | `test-count / test-count guard` | reusable-test-count-guard | gate (PR-only) |
+| `sdlc / sdlc-conformance` | reusable-sdlc-conformance | warn by default; block per repo (pinned to `@sdlc-conformance-v1`) |
 
 GHAS code-scanning is not enabled on these repos, so scanners gate via exit code
 and retain SARIF/JSON as 90-day artifacts (SOC 2 evidence) rather than uploading
@@ -137,6 +138,26 @@ The logic lives in `scripts/test_count.py` (unit-tested by
 `scripts/test_test_count.py` against fixtures in `scripts/fixtures/`); the
 workflow is a thin caller. `guard_ref` selects which ref of this repo the script
 is loaded from and defaults to `v1` — keep it in step with the caller's `@ref`.
+
+## Caller example — sdlc conformance
+
+Copy as `.github/workflows/sdlc.yml`:
+
+```yaml
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review, labeled, unlabeled]
+  pull_request_review:
+    types: [submitted, dismissed]
+permissions: {contents: read, pull-requests: read, issues: read}
+concurrency: {group: sdlc-${{ github.event.pull_request.number }}, cancel-in-progress: true}
+jobs:
+  sdlc:
+    uses: NapticStacks/.github/.github/workflows/reusable-sdlc-conformance.yml@sdlc-conformance-v1
+    with: {mode: warn}
+```
+
+Pin `@sdlc-conformance-v1`, not `@v1`: the gate has its own tag so it can move without moving the shared one. Local pre-push check: `python scripts/sdlc_conformance.py --pr <owner/repo#N>`.
 
 ## Rollout discipline
 
