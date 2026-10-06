@@ -613,3 +613,12 @@ def test_version_compare_uses_full_values():
 @pytest.mark.parametrize("block", ["> ```text\n> Closes #999\n> ```", "- step\n    ```text\n    Closes #999\n    ```"])
 def test_fences_in_blockquotes_and_lists_hide_refs(block):
     assert [n for _, _, n in sc.issue_refs(block + "\n\nCloses #7\n")] == [7]
+
+
+def test_renames_count_both_paths():
+    routes = pr_routes(n_files=1)
+    routes["/repos/NapticStacks/example/pulls/42/files"] = paged(
+        [{"filename": "docs/main.tf", "previous_filename": "terraform/main.tf", "status": "renamed"}])
+    ctx = sc.gather(sc.Api("t0ken", FakeTransport(routes)), REPO, 42)
+    assert sorted(ctx["files"]) == ["docs/main.tf", "terraform/main.tf"]
+    assert not sc.docs_only(ctx["files"])

@@ -437,10 +437,16 @@ class Api:
 
 def gather(api: Api, repo: str, number: int) -> dict:
     pr = api.get(f"/repos/{repo}/pulls/{number}")
-    files = [f["filename"] for f in api.paged(f"/repos/{repo}/pulls/{number}/files")]
-    if len(files) != pr.get("changed_files"):
-        raise CheckerError(f"the file listing returned {len(files)} of {pr.get('changed_files')} "
+    entries = api.paged(f"/repos/{repo}/pulls/{number}/files")
+    if len(entries) != pr.get("changed_files"):
+        raise CheckerError(f"the file listing returned {len(entries)} of {pr.get('changed_files')} "
                            "changed files (truncated), so docs-only can't be decided")
+    # A rename touches both paths: terraform/x.tf -> docs/x.tf is not a docs-only change.
+    files = []
+    for e in entries:
+        files.append(e["filename"])
+        if e.get("previous_filename") and e["previous_filename"] != e["filename"]:
+            files.append(e["previous_filename"])
     reviews = api.paged(f"/repos/{repo}/pulls/{number}/reviews")
     return {"repo": repo, "pr": pr, "files": files, "reviews": reviews}
 
