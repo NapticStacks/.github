@@ -152,7 +152,7 @@ def sections(body: str | None) -> dict[str, str]:
     """{lowercased `## heading`: raw content up to the next `## `}."""
     out: dict[str, str] = {}
     current, buf = None, []
-    lines = (body or "").splitlines()
+    lines = COMMENT_RE.sub("", body or "").splitlines()  # a heading inside <!-- --> isn't one
     for line, fenced in zip(lines, fence_mask(lines)):
         m = None if fenced else HEADING_RE.match(line)
         if m:

@@ -638,3 +638,9 @@ def test_gather_marks_removed_files_absent():
          {"filename": "docs/09c-readiness-old.md", "status": "removed"}])
     ctx = sc.gather(sc.Api("t0ken", FakeTransport(routes)), REPO, 42)
     assert ctx["present"] == ["terraform/main.tf"]
+
+
+def test_headings_hidden_in_comments_do_not_count():
+    body = "## Issue\nCloses #7\n" + "".join(
+        f"<!--\n## {name}\n-->\n" for name in sc.SECTIONS[1:])
+    assert "template" in checks(run(make_ctx(body=body)), sc.VIOLATION)
