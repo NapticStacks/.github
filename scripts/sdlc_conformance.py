@@ -9,7 +9,13 @@ the naptic-sdlc gate catalog:
     evaluate(ctx, opts, issue_lookup, read_file) -> [Finding]   pure
     exit_code(findings, opts)                     -> 0 | 1
     gather(api, repo, number)                     -> ctx         network
+    readiness(ctx, opts)                          -> (state, description)  pure
     main(argv)                                    -> 0 | 1 | 2
+
+`--post-ready` (v2) turns the run into the readiness job: it posts the
+`sdlc/ready` commit status on the head SHA and always exits 0 unless the gate
+itself breaks (2). Without `statuses: write`, or on a fork PR, it says
+"not posted" and still exits 0.
 
 Exit codes (E1): 0 pass (warn mode may still annotate), 1 violations in block
 mode, 2 checker error -- red in any mode, and always says "gate bug, not your PR".
@@ -71,6 +77,15 @@ INFRA_RE = re.compile(r"^(infra|terraform|cdk)/")
 IAM_RE = re.compile(r"(^|[/_.-])iam([_./-]|$)", re.I)
 READINESS_FILE_RE = re.compile(r"(^|/)09c-readiness[^/]*\.md$")
 
+# Readiness v2. The marker is the heading /naptic-review opens every review with
+# (napticstack-skills naptic-review/lenses/synthesis.md). Only the PR author or a
+# trusted reviewer can supply it, and only on the current head commit.
+READY_CONTEXT = "sdlc/ready"
+READY_SUCCESS, READY_PENDING = "success", "pending"
+STATUS_DESC_MAX = 140  # GitHub truncates commit-status descriptions past this
+MARKER_RE = re.compile(r"^##\s+Three-lens review\b")
+MARKER_STATES = ("APPROVED", "COMMENTED", "CHANGES_REQUESTED")
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -79,6 +94,9 @@ class Finding:
     problem: str
     cause: str
     fix: str
+    # Short structured text for the sdlc/ready description (template findings only), so readiness never rewrites
+    # another check's English.
+    gap: str = ""
 
     @property
     def anchor(self) -> str:
@@ -243,21 +261,22 @@ def check_template(repo, number, body, files) -> list[Finding]:
         if key not in found:
             out.append(Finding("template", VIOLATION, f"Missing section `## {name}`.",
                                f"REVIEW.md's definition of done needs all four sections of {TEMPLATE_URL}.",
-                               f"Add the section (or `N/A because ...`): {edit}"))
+                               f"Add the section (or `N/A because ...`): {edit}", gap=f"missing {name}"))
             continue
         content = clean(found[key])
         if not content:
             out.append(Finding("template", VIOLATION, f"Section `## {name}` is empty.",
                                "A heading with only the template comment isn't evidence.",
-                               f"Fill it in, or write `N/A because <reason>`: {edit}"))
+                               f"Fill it in, or write `N/A because <reason>`: {edit}", gap=f"{name} is empty"))
         elif NA_RE.match(content) and not NA_REASON_RE.match(content):
             out.append(Finding("template", VIOLATION, f"Section `## {name}` says N/A with no reason.",
                                "REVIEW.md: every N/A needs a reason.",
-                               f"Write `N/A because <reason>`: {edit}"))
+                               f"Write `N/A because <reason>`: {edit}", gap=f"{name} N/A without a reason"))
         elif key == TESTS_SECTION and NA_DOCS_ONLY_RE.match(content) and not docs_only(files):
             out.append(Finding("docs-only", VIOLATION, "`N/A: docs-only` on a diff that changes code.",
                                "Only a diff that touches docs paths alone can skip the tests item.",
-                               f"Paste the tests named in the issue and their output: {edit}"))
+                               f"Paste the tests named in the issue and their output: {edit}",
+                               gap=f"{name} says docs-only on a code diff"))
     return out
 
 
@@ -395,6 +414,116 @@ def annotation(f: Finding, mode: str) -> str:
     return f"::{kind} title=sdlc {f.check}::{_escape(msg)}"
 
 
+# --- readiness (v2) -----------------------------------------------------------------
+
+def is_marker(review: dict) -> bool:
+    return review.get("state") in MARKER_STATES and bool(MARKER_RE.match((review.get("body") or "").lstrip()))
+
+
+def asks_changes(review: dict) -> bool:
+    """A marker that asks for changes: GitHub's state, or the verdict on its first line. A self-review is posted as a
+    COMMENT (GitHub refuses request-changes on your own PR), so its heading carries the real verdict."""
+    first = (review.get("body") or "").lstrip().split("\n", 1)[0]
+    return review.get("state") == "CHANGES_REQUESTED" or "REQUEST CHANGES" in first.upper()
+
+
+def marker_state(reviews: list[dict], head_sha: str, allowed) -> str:
+    """ok | changes | stale | none, from /naptic-review marker reviews by `allowed` logins.
+
+    On the head commit, each login's newest marker stands; if any of them asks for changes, the PR is not ready.
+    So an author's later marker never clears a trusted reviewer's change request; only that reviewer's own later
+    marker does. Markers on older commits are stale. A dismissed review is not a marker."""
+    allowed_l = {a.strip().lower() for a in allowed if a and a.strip()}
+    marks = sorted((r for r in reviews if is_marker(r)
+                    and ((r.get("user") or {}).get("login") or "").lower() in allowed_l),
+                   key=lambda r: r.get("submitted_at") or "")
+    latest: dict[str, dict] = {}
+    for r in marks:
+        if r.get("commit_id") == head_sha:
+            latest[((r.get("user") or {}).get("login") or "").lower()] = r
+    if latest:
+        return "changes" if any(asks_changes(r) for r in latest.values()) else "ok"
+    return "stale" if marks else "none"
+
+
+def _fit(items: list[str], prefix: str, suffix: str) -> str:
+    """prefix + as many items as fit + suffix, within STATUS_DESC_MAX."""
+    for keep in range(len(items), 0, -1):
+        more = f" (+{len(items) - keep} more)" if keep < len(items) else ""
+        text = prefix + "; ".join(items[:keep]) + more + suffix
+        if len(text) <= STATUS_DESC_MAX:
+            return text
+    return (prefix + suffix)[:STATUS_DESC_MAX]
+
+
+def readiness(ctx: dict, opts: Options) -> tuple[str, str]:
+    """(success | pending, description) for the sdlc/ready status. Pure.
+
+    Ready means: not a draft, the four template sections pass (humans only, same
+    as the conformance run), and a /naptic-review marker review on the head SHA."""
+    repo, pr = ctx["repo"], ctx["pr"]
+    number, head = pr["number"], pr["head"]["sha"]
+    short = head[:7]
+    if pr.get("draft"):
+        return READY_PENDING, f"Draft PR. Mark it ready when it is: gh pr ready {number}"
+    author = (pr.get("user") or {}).get("login") or ""
+    if author_kind(author, opts.bot_authors) == "Human":
+        gaps = [f.gap or f.problem.rstrip(".") for f in check_template(repo, number, pr.get("body") or "", ctx["files"])]
+        if gaps:
+            return READY_PENDING, _fit(gaps, "PR body: ", f". Fix: gh pr edit {number}")
+    state = marker_state(ctx["reviews"], head, (author, *opts.trusted_reviewers))
+    if state == "ok":
+        return READY_SUCCESS, f"Ready: template complete, /naptic-review on {short}."
+    if state == "changes":
+        return READY_PENDING, f"/naptic-review asked for changes on {short}. Fix, push, run /naptic-review {number}"
+    older = " (last one is on an older commit)" if state == "stale" else ""
+    return READY_PENDING, f"No /naptic-review on head {short}{older}. Run /naptic-review {number}"
+
+
+def is_fork(repo: str, pr: dict) -> bool:
+    head = pr.get("head") or {}
+    # No repo key at all (a trimmed payload): assume same-repo; a fork would 403 into the "not posted" path anyway.
+    # A null repo is a deleted fork, and counts as one.
+    if "repo" not in head:
+        return False
+    return ((head.get("repo") or {}).get("full_name") or "").lower() != repo.lower()
+
+
+def post_ready(api: "Api", ctx: dict, opts: Options, in_actions: bool) -> int:
+    """Post sdlc/ready on the head SHA. Advisory: exits 0 whatever the verdict."""
+    repo, pr = ctx["repo"], ctx["pr"]
+    state, desc = readiness(ctx, opts)
+    head = pr["head"]["sha"]
+    if is_fork(repo, pr):
+        return _ready_report(f"sdlc/ready not posted: fork PR (the token is read-only). Would be {state}: {desc}",
+                             in_actions, warn=True)
+    payload = {"state": state, "context": READY_CONTEXT, "description": desc}
+    server, run_id = os.environ.get("GITHUB_SERVER_URL"), os.environ.get("GITHUB_RUN_ID")
+    if server and run_id:
+        payload["target_url"] = f"{server}/{repo}/actions/runs/{run_id}"
+    try:
+        api.post(f"/repos/{repo}/statuses/{head}", payload)
+    except ApiError as e:
+        if e.status != 403:
+            raise
+        return _ready_report("sdlc/ready not posted: the caller's token lacks `statuses: write`. "
+                             "Add it to the caller's permissions (see the v2 caller in .github/workflows/README.md). "
+                             f"Would be {state}: {desc}", in_actions, warn=True)
+    return _ready_report(f"sdlc/ready {state} on {head[:7]}: {desc}", in_actions, warn=False)
+
+
+def _ready_report(line: str, in_actions: bool, warn: bool) -> int:
+    if in_actions:
+        print(f"::{'warning' if warn else 'notice'} title=sdlc ready::{_escape(line)}")
+    else:
+        print(line)
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if path:
+        with open(path, "a") as fh:
+            fh.write(f"### {line}\n")
+    return EXIT_OK
+
+
 # --- network --------------------------------------------------------------------------
 
 class ApiError(CheckerError):
@@ -403,8 +532,9 @@ class ApiError(CheckerError):
         self.status = status
 
 
-def _urllib_fetch(url: str, headers: dict):
-    req = urllib.request.Request(url, headers=headers)
+def _urllib_fetch(url: str, headers: dict, data: bytes | None = None):
+    req = urllib.request.Request(url, headers=headers, data=data,
+                                 method="POST" if data is not None else "GET")
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.load(resp)
@@ -420,12 +550,16 @@ class Api:
     def __init__(self, token: str, fetch=None):
         self.token, self.fetch = token, fetch or _urllib_fetch
 
+    def _headers(self) -> dict:
+        return {"Authorization": f"Bearer {self.token}", "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "naptic-sdlc-conformance"}
+
     def get(self, path: str, params: dict | None = None):
         url = API + path + ("?" + urllib.parse.urlencode(params) if params else "")
-        return self.fetch(url, {"Authorization": f"Bearer {self.token}",
-                                "Accept": "application/vnd.github+json",
-                                "X-GitHub-Api-Version": "2022-11-28",
-                                "User-Agent": "naptic-sdlc-conformance"})
+        return self.fetch(url, self._headers())
+
+    def post(self, path: str, payload: dict):
+        return self.fetch(API + path, {**self._headers(), "Content-Type": "application/json"}, json.dumps(payload).encode())
 
     def paged(self, path: str) -> list:
         items, page = [], 1
@@ -513,6 +647,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--require-approval", action="store_true")
     p.add_argument("--trusted-reviewers", default="maydaycyber")
     p.add_argument("--bot-authors", default="")
+    p.add_argument("--post-ready", action="store_true",
+                   help="v2 readiness job: post the sdlc/ready commit status instead of conformance findings.")
     for flag in ("unf-phase", "changelog", "version-bump", "phase-09c-on-infra"):
         p.add_argument(f"--{flag}", action="store_true")
     return p
@@ -549,6 +685,8 @@ def main(argv=None) -> int:
             repo, number = os.environ["SDLC_REPO"], int(os.environ["SDLC_PR"])
         api = Api(_token())
         ctx = gather(api, repo, number)
+        if args.post_ready:
+            return post_ready(api, ctx, opts, in_actions)
         findings = evaluate(ctx, opts, issue_lookup_for(api, repo), read_file_for(api, repo))
         _print(findings, opts, in_actions)
     except Exception as e:  # noqa: BLE001 -- any failure here is the gate's, never the PR's (E1: exit 2)

@@ -23,7 +23,8 @@ names in `project-manager` → `config/repo_review_policy.json` are
 | `ci / SCA (pip-audit)` | reusable-ci-python | evidence |
 | `ci / SCA (npm-audit)` | reusable-ci-node | gate (Node) |
 | `test-count / test-count guard` | reusable-test-count-guard | gate (PR-only) |
-| `sdlc / sdlc-conformance` | reusable-sdlc-conformance | warn by default; block per repo (pinned to `@sdlc-conformance-v1`) |
+| `sdlc / sdlc-conformance` | reusable-sdlc-conformance | warn by default; block per repo (pinned to `@sdlc-conformance-v1` or `-v2`) |
+| `sdlc / sdlc-ready` + commit status `sdlc/ready` | reusable-sdlc-conformance (v2 only) | advisory, never required; Claude Skins reads it |
 
 GHAS code-scanning is not enabled on these repos, so scanners gate via exit code
 and retain SARIF/JSON as 90-day artifacts (SOC 2 evidence) rather than uploading
@@ -141,23 +142,56 @@ is loaded from and defaults to `v1` — keep it in step with the caller's `@ref`
 
 ## Caller example — sdlc conformance
 
-Copy as `.github/workflows/sdlc.yml`:
+Copy as `.github/workflows/sdlc.yml` (v2, current):
 
 ```yaml
 on:
   pull_request:
-    types: [opened, edited, synchronize, reopened, ready_for_review, labeled, unlabeled]
+    types: [opened, edited, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled]
   pull_request_review:
-    types: [submitted, dismissed]
-permissions: {contents: read, pull-requests: read, issues: read}
-concurrency: {group: sdlc-${{ github.event.pull_request.number }}, cancel-in-progress: true}
+    types: [submitted, edited, dismissed]
+permissions: {contents: read, pull-requests: read, issues: read, statuses: write}
+concurrency:
+  group: sdlc-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 jobs:
   sdlc:
-    uses: NapticStacks/.github/.github/workflows/reusable-sdlc-conformance.yml@sdlc-conformance-v1
+    uses: NapticStacks/.github/.github/workflows/reusable-sdlc-conformance.yml@sdlc-conformance-v2
     with: {mode: warn}
 ```
 
-Pin `@sdlc-conformance-v1`, not `@v1`: the gate has its own tag so it can move without moving the shared one.
+### v1 / v2 compatibility
+
+| | v1 caller (`@sdlc-conformance-v1`) | v2 caller (`@sdlc-conformance-v2`) |
+|---|---|---|
+| `sdlc / sdlc-conformance` | yes, unchanged | yes, same checks and exit codes |
+| `sdlc / sdlc-ready` job | no | yes |
+| `sdlc/ready` commit status | no | yes, when the caller grants `statuses: write` |
+| Inputs | all v1 inputs | all v1 inputs, same names and defaults; `gate_ref` defaults to `sdlc-conformance-v2` |
+| Without `statuses: write` | n/a | `sdlc-ready` warns "not posted" and stays green |
+| Fork PR | n/a | "not posted" (the token is read-only) |
+
+v1 is not deprecated. Its tag never moves, so a v1 caller keeps working exactly as before.
+
+### Migrating v1 → v2
+
+1. Change `@sdlc-conformance-v1` to `@sdlc-conformance-v2` (once that tag exists: it is cut on the merge commit of the v2 PR).
+2. Add `converted_to_draft` to the `pull_request` types and `edited` to the `pull_request_review` types, so a PR turned back into a draft or a review edited to drop its marker re-posts `pending`.
+3. Add `statuses: write` to the caller's `permissions:`.
+4. If the caller pins `gate_ref`, set it to `sdlc-conformance-v2` too (or drop it to take the default).
+5. Open a PR and check both `sdlc / sdlc-conformance` and `sdlc / sdlc-ready` report. Don't make `sdlc-ready` a required check: it is advisory.
+
+### What "ready" means
+
+`sdlc/ready` is `success` when all three hold, and `pending` otherwise. The description says what's missing and the command that fixes it.
+
+- The PR is not a draft.
+- The four template sections pass, under the same template rule `sdlc-conformance` applies (readiness does not re-check the issue link). `## /review findings` is non-empty or `N/A because <reason>`. Bot-authored PRs skip this, as in the conformance run.
+- A `/naptic-review` **marker review** is on the head commit. The marker is a review whose body starts with `## Three-lens review` (the heading `/naptic-review` opens every review with). It counts only from the PR author or a `trusted_reviewers` login, and only when its `commit_id` is the head SHA. A push makes it stale. Each login's newest marker on head stands, and if any of them asks for changes (the review state, or `REQUEST CHANGES` in its heading, which is how a self-review posted as a comment says it), the PR is not ready. An author's marker never clears a trusted reviewer's change request.
+
+**`sdlc/ready` is advisory, never an authorization.** On `pull_request`, GitHub runs the caller from the PR's own head, so a PR that edits its caller can post the status itself, as `github-actions[bot]` like any run. Readers take the newest status from that creator, but must never use it to gate a merge, an auto-merge or a deploy.
+
+Pin `@sdlc-conformance-v2` (or `-v1`), not `@v1`: the gate has its own tag so it can move without moving the shared one.
 
 **Local pre-push check:** from a clone of `NapticStacks/.github` (Python 3.11+, `gh auth login` done), run `python scripts/sdlc_conformance.py --pr <owner/repo#N>`. It uses the same code path and the same exit codes as CI.
 

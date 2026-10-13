@@ -459,7 +459,7 @@ def test_workflow_pins_every_action_to_a_sha():
 
 def test_workflow_defaults_to_its_own_tag_and_job_name():
     text = WORKFLOW.read_text()
-    assert "default: sdlc-conformance-v1" in text
+    assert "default: sdlc-conformance-v2" in text
     assert "name: sdlc-conformance" in text
 
 
@@ -644,3 +644,260 @@ def test_headings_hidden_in_comments_do_not_count():
     body = "## Issue\nCloses #7\n" + "".join(
         f"<!--\n## {name}\n-->\n" for name in sc.SECTIONS[1:])
     assert "template" in checks(run(make_ctx(body=body)), sc.VIOLATION)
+
+
+# --- readiness v2: the sdlc/ready commit status ----------------------------------------
+
+MARKER_BODY = "## Three-lens review — COMMENT\n\n**ROI:** n/a\n"
+
+
+def marker(login, sha, state="COMMENTED", body=MARKER_BODY, at="2026-10-13T12:00:00Z"):
+    return {"user": {"login": login}, "state": state, "commit_id": sha, "submitted_at": at, "body": body}
+
+
+def ready_ctx(reviews=None, **pr_overrides):
+    ctx = make_ctx(**pr_overrides)
+    ctx["reviews"] = [marker("example-dev", HEAD)] if reviews is None else reviews
+    return ctx
+
+
+def test_ready_when_template_complete_and_marker_on_head():
+    state, desc = sc.readiness(ready_ctx(), sc.Options())
+    assert state == sc.READY_SUCCESS
+    assert HEAD[:7] in desc
+
+
+def test_ready_marker_by_trusted_reviewer_counts():
+    state, _ = sc.readiness(ready_ctx([marker("maydaycyber", HEAD, state="APPROVED")]), sc.Options())
+    assert state == sc.READY_SUCCESS
+
+
+def test_ready_no_marker_is_pending_and_names_the_fix_command():
+    state, desc = sc.readiness(ready_ctx([]), sc.Options())
+    assert state == sc.READY_PENDING
+    assert "/naptic-review 42" in desc and HEAD[:7] in desc
+
+
+def test_ready_stale_marker_on_an_older_commit_is_pending():
+    state, desc = sc.readiness(ready_ctx([marker("example-dev", "c" * 40)]), sc.Options())
+    assert state == sc.READY_PENDING and "/naptic-review" in desc
+
+
+@pytest.mark.parametrize("review", [
+    marker("drive-by-user", HEAD),                                   # not the author, not trusted
+    marker("example-dev", HEAD, body="LGTM\n## Three-lens review"),  # heading not first
+    marker("example-dev", HEAD, body="## Two-lens review — COMMENT"),
+    marker("example-dev", HEAD, state="DISMISSED"),
+])
+def test_ready_forged_or_malformed_marker_does_not_count(review):
+    state, _ = sc.readiness(ready_ctx([review]), sc.Options())
+    assert state == sc.READY_PENDING
+
+
+def test_ready_latest_marker_requesting_changes_is_pending():
+    reviews = [marker("maydaycyber", HEAD, at="2026-10-13T10:00:00Z"),
+               marker("maydaycyber", HEAD, state="CHANGES_REQUESTED", at="2026-10-13T11:00:00Z")]
+    state, desc = sc.readiness(ready_ctx(reviews), sc.Options())
+    assert state == sc.READY_PENDING and "changes" in desc.lower()
+
+
+def test_ready_missing_section_is_pending_and_names_it():
+    body = make_ctx()["pr"]["body"].split("## /review findings")[0]
+    state, desc = sc.readiness(ready_ctx(body=body), sc.Options())
+    assert state == sc.READY_PENDING
+    assert "/review findings" in desc and "gh pr edit 42" in desc
+
+
+def test_ready_review_findings_na_because_is_ready():
+    body = make_ctx()["pr"]["body"].replace("No findings.", "N/A because nothing was found")
+    assert sc.readiness(ready_ctx(body=body), sc.Options())[0] == sc.READY_SUCCESS
+
+
+def test_ready_edited_body_flips_pending_to_success():
+    broken = make_ctx()["pr"]["body"].replace("No findings.", "")
+    assert sc.readiness(ready_ctx(body=broken), sc.Options())[0] == sc.READY_PENDING
+    fixed = broken + "One nit, fixed in the last commit.\n"
+    assert sc.readiness(ready_ctx(body=fixed), sc.Options())[0] == sc.READY_SUCCESS
+
+
+def test_ready_draft_is_pending():
+    state, desc = sc.readiness(ready_ctx(draft=True), sc.Options())
+    assert state == sc.READY_PENDING and "draft" in desc.lower()
+
+
+def test_ready_description_fits_the_status_limit():
+    body = "## Issue\nCloses #7\n"  # three sections missing
+    _, desc = sc.readiness(ready_ctx([], body=body), sc.Options())
+    assert len(desc) <= sc.STATUS_DESC_MAX
+
+
+class PostTransport(FakeTransport):
+    """FakeTransport plus POSTs: records (url, payload); `post_status` int raises."""
+    def __init__(self, routes, post_status=None):
+        super().__init__(routes)
+        self.posts, self.post_status = [], post_status
+
+    def __call__(self, url, headers, data=None):
+        if data is None:
+            return super().__call__(url, headers)
+        if self.post_status:
+            raise sc.ApiError(self.post_status, url)
+        self.posts.append((url, json.loads(data)))
+        return {}
+
+
+def ready_routes(pr_extra=None, reviews=None):
+    routes = pr_routes(pr_extra=pr_extra)
+    routes["/repos/NapticStacks/example/pulls/42/files"] = paged(
+        [{"filename": "src/widget.py"}, {"filename": "tests/test_widget.py"}])
+    routes["/repos/NapticStacks/example/pulls/42/reviews"] = paged(
+        [marker("example-dev", HEAD)] if reviews is None else reviews)
+    return routes
+
+
+def main_ready(monkeypatch, transport, extra=()):
+    monkeypatch.setenv("GH_TOKEN", "t0ken")
+    monkeypatch.setattr(sc, "_urllib_fetch", transport)
+    return sc.main(["--pr", "NapticStacks/example#42", "--post-ready", *extra])
+
+
+def test_post_ready_posts_success_to_the_head_sha(monkeypatch):
+    transport = PostTransport(ready_routes())
+    assert main_ready(monkeypatch, transport) == sc.EXIT_OK
+    [(url, payload)] = transport.posts
+    assert url == f"{sc.API}/repos/NapticStacks/example/statuses/{HEAD}"
+    assert payload["context"] == "sdlc/ready" and payload["state"] == "success"
+
+
+def test_post_ready_without_statuses_permission_warns_and_exits_0(monkeypatch, capsys, tmp_path):
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    transport = PostTransport(ready_routes(), post_status=403)
+    assert main_ready(monkeypatch, transport) == sc.EXIT_OK
+    out = capsys.readouterr().out
+    assert "::warning" in out and "statuses" in out
+    assert "not posted" in summary.read_text()
+
+
+def test_post_ready_on_a_fork_pr_is_not_posted(monkeypatch, capsys):
+    fork = {"head": {"sha": HEAD, "repo": {"full_name": "someone/example"}}}
+    transport = PostTransport(ready_routes(pr_extra=fork))
+    assert main_ready(monkeypatch, transport) == sc.EXIT_OK
+    assert transport.posts == []
+    assert "not posted" in capsys.readouterr().out.lower()
+
+
+def test_post_ready_other_api_error_is_a_checker_error(monkeypatch):
+    transport = PostTransport(ready_routes(), post_status=500)
+    assert main_ready(monkeypatch, transport) == sc.EXIT_CHECKER_ERROR
+
+
+def test_ready_without_post_ready_nothing_is_posted(monkeypatch):
+    """The v1 path: the conformance run never writes."""
+    transport = PostTransport(ready_routes())
+    monkeypatch.setenv("GH_TOKEN", "t0ken")
+    monkeypatch.setattr(sc, "_urllib_fetch", transport)
+    sc.main(["--pr", "NapticStacks/example#42"])
+    assert transport.posts == []
+
+
+def test_post_ready_ignores_conformance_violations(monkeypatch):
+    """Readiness is advisory: a huge PR still exits 0 from the ready job, even in block mode."""
+    transport = PostTransport(ready_routes(pr_extra={"additions": 5000}))
+    assert main_ready(monkeypatch, transport, ["--mode", "block"]) == sc.EXIT_OK
+    assert transport.posts[0][1]["state"] == "success"
+
+
+def test_ready_workflow_v2_has_a_ready_job_that_inherits_caller_permissions():
+    text = WORKFLOW.read_text()
+    assert "name: sdlc-ready" in text and "--post-ready" in text
+    top = text.split("\njobs:", 1)[0]
+    assert "\npermissions:" not in top  # a top-level block would cap the ready job at read-only
+
+
+def test_ready_workflow_v1_inputs_still_accepted():
+    text = WORKFLOW.read_text()
+    for name in ("mode", "require_approval", "trusted_reviewers", "bot_authors", "unf_phase",
+                 "changelog", "version_bump", "phase_09c_on_infra", "gate_ref"):
+        assert f"\n      {name}:" in text, name
+
+
+README = Path(__file__).parent.parent / ".github" / "workflows" / "README.md"
+
+
+def readme_v2_caller() -> str:
+    """The v2 caller YAML block in the README, or a clear failure naming what moved."""
+    text = README.read_text()
+    assert "(v2, current):" in text, "README lost its '(v2, current):' caller heading"
+    after = text.split("(v2, current):", 1)[1]
+    assert "```yaml" in after, "no ```yaml block after the v2 caller heading"
+    return after.split("```yaml", 1)[1].split("```", 1)[0]
+
+
+def test_ready_v2_caller_reruns_on_every_event_that_can_flip_readiness():
+    """codex 3a: back-to-draft and an edited review must re-post, or a stale success lingers."""
+    caller = readme_v2_caller()
+    pr_types = caller.split("pull_request:", 1)[1].split("\n", 2)[1]
+    review_types = caller.split("pull_request_review:", 1)[1].split("\n", 2)[1]
+    for t in ("opened", "edited", "synchronize", "reopened", "ready_for_review", "converted_to_draft"):
+        assert t in pr_types, t
+    for t in ("submitted", "edited", "dismissed"):
+        assert t in review_types, t
+    assert "statuses: write" in caller and "@sdlc-conformance-v2" in caller
+    # ${{ }} inside a {...} flow mapping is invalid YAML: concurrency must be block style.
+    assert "{group:" not in caller
+
+
+# --- /naptic-review round (.github#9, napticstack-skills#384) ---------------------------
+
+def test_ready_author_cannot_clear_a_trusted_reviewers_change_request():
+    reviews = [marker("maydaycyber", HEAD, state="CHANGES_REQUESTED", at="2026-10-13T10:00:00Z"),
+               marker("example-dev", HEAD, at="2026-10-13T11:00:00Z")]
+    state, desc = sc.readiness(ready_ctx(reviews), sc.Options())
+    assert state == sc.READY_PENDING and "changes" in desc.lower()
+
+
+def test_ready_a_later_trusted_marker_clears_its_own_change_request():
+    reviews = [marker("maydaycyber", HEAD, state="CHANGES_REQUESTED", at="2026-10-13T10:00:00Z"),
+               marker("maydaycyber", HEAD, state="APPROVED", at="2026-10-13T11:00:00Z")]
+    assert sc.readiness(ready_ctx(reviews), sc.Options())[0] == sc.READY_SUCCESS
+
+
+def test_ready_self_review_posted_as_comment_with_request_changes_verdict_is_pending():
+    body = "## Three-lens review — REQUEST CHANGES (posted as a comment: own PR)\n\n- [MAJOR] ..."
+    state, _ = sc.readiness(ready_ctx([marker("example-dev", HEAD, body=body)]), sc.Options())
+    assert state == sc.READY_PENDING
+
+
+def test_ready_a_dismissed_change_request_falls_back_to_the_earlier_marker():
+    reviews = [marker("maydaycyber", HEAD, at="2026-10-13T10:00:00Z"),
+               marker("maydaycyber", HEAD, state="DISMISSED", at="2026-10-13T11:00:00Z")]
+    assert sc.readiness(ready_ctx(reviews), sc.Options())[0] == sc.READY_SUCCESS
+
+
+def test_ready_bot_pr_skips_the_template_but_still_needs_the_marker():
+    ctx = ready_ctx(body="Bumps foo.", user={"login": "naptic-hp-agent[bot]"})
+    opts = sc.Options(bot_authors=("naptic-hp-agent[bot]",), trusted_reviewers=("maydaycyber",))
+    assert sc.readiness(ctx, opts)[0] == sc.READY_PENDING  # no marker yet: the template skip doesn't make it ready
+    ctx = ready_ctx([marker("maydaycyber", HEAD)], body="Bumps foo.", user={"login": "naptic-hp-agent[bot]"})
+    assert sc.readiness(ctx, opts)[0] == sc.READY_SUCCESS
+
+
+def test_ready_deleted_fork_counts_as_a_fork():
+    assert sc.is_fork("NapticStacks/example", {"head": {"sha": HEAD, "repo": None}}) is True
+    assert sc.is_fork("NapticStacks/example", {"head": {"sha": HEAD}}) is False
+
+
+def test_ready_gap_text_comes_from_the_finding_not_its_wording():
+    findings = sc.check_template(REPO, 42, "## Issue\nCloses #7\n", [])
+    assert [f.gap for f in findings] == ["missing Tests named in the issue", "missing Verification evidence",
+                                         "missing /review findings"]
+
+
+def test_ready_job_guards_gate_ref_like_the_conformance_job():
+    """The ready job copies three setup steps; the gate_ref guard and the pinned checkout must stay identical."""
+    jobs = WORKFLOW.read_text().split("\n  sdlc-ready:", 1)
+    conformance, ready = jobs[0].split("\n  sdlc-conformance:", 1)[1], jobs[1]
+    pick = lambda block: [l.strip() for l in block.splitlines() if "GATE_REF\" =~" in l or "actions/checkout@" in l or "actions/setup-python@" in l]
+    assert pick(conformance) and pick(conformance) == pick(ready)
