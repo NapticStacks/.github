@@ -5,18 +5,16 @@
 # emitted check context is deterministic:
 #   sdlc / sdlc-conformance
 #
-# Caller template (copy as .github/workflows/sdlc.yml):
-#   on:
-#     pull_request:
-#       types: [opened, edited, synchronize, reopened, ready_for_review, labeled, unlabeled]
-#     pull_request_review:
-#       types: [submitted, dismissed]
-#   permissions: {contents: read, pull-requests: read, issues: read}
-#   concurrency: {group: sdlc-${{ github.event.pull_request.number }}, cancel-in-progress: true}
-#   jobs:
-#     sdlc:
-#       uses: NapticStacks/.github/.github/workflows/reusable-sdlc-conformance.yml@sdlc-conformance-v1
-#       with: {mode: warn}
+# v2 adds a second job, `sdlc / sdlc-ready`, which posts the `sdlc/ready` commit
+# status on the PR head (Claude Skins pops only ready PRs). The caller template and
+# the v1 -> v2 migration live in .github/workflows/README.md ("Caller example -- sdlc
+# conformance"). The caller must grant the statuses permission for the status to
+# post; without it the job warns "not posted" and stays green.
+#
+# Permissions: there is deliberately no workflow-level `permissions:` block. A
+# called workflow can only narrow the caller's token, so a top-level read-only
+# block would cap sdlc-ready too. Each job sets its own: sdlc-conformance narrows
+# to read-only; sdlc-ready inherits the caller's grant.
 #
 # SAFETY: no PR code is checked out, and the PR title/body never reach a shell --
 # the script reads them from the API. Only the repo name and PR number cross into
@@ -61,18 +59,17 @@ on:
       gate_ref:
         description: "Ref of NapticStacks/.github to load scripts/sdlc_conformance.py from. Keep in step with the caller's @ref."
         type: string
-        default: sdlc-conformance-v1
-
-permissions:
-  contents: read
-  pull-requests: read
-  issues: read
+        default: sdlc-conformance-v2
 
 jobs:
   sdlc-conformance:
     name: sdlc-conformance
     if: ${{ github.event.pull_request != null }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
     steps:
       # gate_ref must be a gate tag or a full SHA: a PR that edits its own caller
       # must not be able to point the gate at an arbitrary branch.
@@ -123,3 +120,45 @@ jobs:
             --trusted-reviewers "$TRUSTED" \
             --bot-authors "$BOTS" \
             "${FLAGS[@]}"
+
+  # Readiness (v2): posts sdlc/ready = success | pending on the head SHA. Advisory:
+  # exits 0 whatever the verdict, and warns "not posted" on a fork PR or when the
+  # caller didn't grant the statuses permission. Exit 2 still means a gate bug.
+  sdlc-ready:
+    name: sdlc-ready
+    if: ${{ github.event.pull_request != null }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate gate_ref
+        env:
+          GATE_REF: ${{ inputs.gate_ref }}
+        run: |
+          if ! [[ "$GATE_REF" =~ ^sdlc-conformance-v[0-9]+$ || "$GATE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error title=sdlc checker error::gate_ref must be an sdlc-conformance-vN tag or a 40-char SHA, got: $GATE_REF"
+            exit 2
+          fi
+
+      - name: Check out the gate script (not the PR)
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          repository: NapticStacks/.github
+          ref: ${{ inputs.gate_ref }}
+          path: gate
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Post sdlc/ready
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SDLC_REPO: ${{ github.repository }}
+          SDLC_PR: ${{ github.event.pull_request.number }}
+          TRUSTED: ${{ inputs.trusted_reviewers }}
+          BOTS: ${{ inputs.bot_authors }}
+        run: |
+          set -euo pipefail
+          python gate/scripts/sdlc_conformance.py --post-ready \
+            --trusted-reviewers "$TRUSTED" \
+            --bot-authors "$BOTS"
