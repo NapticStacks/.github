@@ -175,7 +175,7 @@ v1 is not deprecated. Its tag never moves, so a v1 caller keeps working exactly 
 
 ### Migrating v1 → v2
 
-1. Change `@sdlc-conformance-v1` to `@sdlc-conformance-v2`.
+1. Change `@sdlc-conformance-v1` to `@sdlc-conformance-v2` (once that tag exists: it is cut on the merge commit of the v2 PR).
 2. Add `converted_to_draft` to the `pull_request` types and `edited` to the `pull_request_review` types, so a PR turned back into a draft or a review edited to drop its marker re-posts `pending`.
 3. Add `statuses: write` to the caller's `permissions:`.
 4. If the caller pins `gate_ref`, set it to `sdlc-conformance-v2` too (or drop it to take the default).
@@ -186,10 +186,10 @@ v1 is not deprecated. Its tag never moves, so a v1 caller keeps working exactly 
 `sdlc/ready` is `success` when all three hold, and `pending` otherwise. The description says what's missing and the command that fixes it.
 
 - The PR is not a draft.
-- The four template sections pass, the same rule `sdlc-conformance` applies. `## /review findings` is non-empty or `N/A because <reason>`. Bot-authored PRs skip this, as in the conformance run.
-- A `/naptic-review` **marker review** is on the head commit. The marker is a review whose body starts with `## Three-lens review` (the heading `/naptic-review` opens every review with). It counts only from the PR author or a `trusted_reviewers` login, and only when its `commit_id` is the head SHA. A push makes it stale. If the latest marker on head requests changes, the PR is not ready.
+- The four template sections pass, under the same template rule `sdlc-conformance` applies (readiness does not re-check the issue link). `## /review findings` is non-empty or `N/A because <reason>`. Bot-authored PRs skip this, as in the conformance run.
+- A `/naptic-review` **marker review** is on the head commit. The marker is a review whose body starts with `## Three-lens review` (the heading `/naptic-review` opens every review with). It counts only from the PR author or a `trusted_reviewers` login, and only when its `commit_id` is the head SHA. A push makes it stale. Each login's newest marker on head stands, and if any of them asks for changes (the review state, or `REQUEST CHANGES` in its heading, which is how a self-review posted as a comment says it), the PR is not ready. An author's marker never clears a trusted reviewer's change request.
 
-The status is posted by `github-actions[bot]`. Readers (Claude Skins) trust only that creator, newest by `createdAt`.
+**`sdlc/ready` is advisory, never an authorization.** On `pull_request`, GitHub runs the caller from the PR's own head, so a PR that edits its caller can post the status itself, as `github-actions[bot]` like any run. Readers take the newest status from that creator, but must never use it to gate a merge, an auto-merge or a deploy.
 
 Pin `@sdlc-conformance-v2` (or `-v1`), not `@v1`: the gate has its own tag so it can move without moving the shared one.
 

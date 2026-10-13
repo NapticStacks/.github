@@ -94,6 +94,9 @@ class Finding:
     problem: str
     cause: str
     fix: str
+    # Short structured text for the sdlc/ready description (template findings only), so readiness never rewrites
+    # another check's English.
+    gap: str = ""
 
     @property
     def anchor(self) -> str:
@@ -258,21 +261,22 @@ def check_template(repo, number, body, files) -> list[Finding]:
         if key not in found:
             out.append(Finding("template", VIOLATION, f"Missing section `## {name}`.",
                                f"REVIEW.md's definition of done needs all four sections of {TEMPLATE_URL}.",
-                               f"Add the section (or `N/A because ...`): {edit}"))
+                               f"Add the section (or `N/A because ...`): {edit}", gap=f"missing {name}"))
             continue
         content = clean(found[key])
         if not content:
             out.append(Finding("template", VIOLATION, f"Section `## {name}` is empty.",
                                "A heading with only the template comment isn't evidence.",
-                               f"Fill it in, or write `N/A because <reason>`: {edit}"))
+                               f"Fill it in, or write `N/A because <reason>`: {edit}", gap=f"{name} is empty"))
         elif NA_RE.match(content) and not NA_REASON_RE.match(content):
             out.append(Finding("template", VIOLATION, f"Section `## {name}` says N/A with no reason.",
                                "REVIEW.md: every N/A needs a reason.",
-                               f"Write `N/A because <reason>`: {edit}"))
+                               f"Write `N/A because <reason>`: {edit}", gap=f"{name} N/A without a reason"))
         elif key == TESTS_SECTION and NA_DOCS_ONLY_RE.match(content) and not docs_only(files):
             out.append(Finding("docs-only", VIOLATION, "`N/A: docs-only` on a diff that changes code.",
                                "Only a diff that touches docs paths alone can skip the tests item.",
-                               f"Paste the tests named in the issue and their output: {edit}"))
+                               f"Paste the tests named in the issue and their output: {edit}",
+                               gap=f"{name} says docs-only on a code diff"))
     return out
 
 
@@ -416,16 +420,29 @@ def is_marker(review: dict) -> bool:
     return review.get("state") in MARKER_STATES and bool(MARKER_RE.match((review.get("body") or "").lstrip()))
 
 
+def asks_changes(review: dict) -> bool:
+    """A marker that asks for changes: GitHub's state, or the verdict on its first line. A self-review is posted as a
+    COMMENT (GitHub refuses request-changes on your own PR), so its heading carries the real verdict."""
+    first = (review.get("body") or "").lstrip().split("\n", 1)[0]
+    return review.get("state") == "CHANGES_REQUESTED" or "REQUEST CHANGES" in first.upper()
+
+
 def marker_state(reviews: list[dict], head_sha: str, allowed) -> str:
     """ok | changes | stale | none, from /naptic-review marker reviews by `allowed` logins.
-    The latest marker on the head commit decides; markers on older commits are stale."""
+
+    On the head commit, each login's newest marker stands; if any of them asks for changes, the PR is not ready.
+    So an author's later marker never clears a trusted reviewer's change request; only that reviewer's own later
+    marker does. Markers on older commits are stale. A dismissed review is not a marker."""
     allowed_l = {a.strip().lower() for a in allowed if a and a.strip()}
     marks = sorted((r for r in reviews if is_marker(r)
                     and ((r.get("user") or {}).get("login") or "").lower() in allowed_l),
                    key=lambda r: r.get("submitted_at") or "")
-    on_head = [r for r in marks if r.get("commit_id") == head_sha]
-    if on_head:
-        return "changes" if on_head[-1]["state"] == "CHANGES_REQUESTED" else "ok"
+    latest: dict[str, dict] = {}
+    for r in marks:
+        if r.get("commit_id") == head_sha:
+            latest[((r.get("user") or {}).get("login") or "").lower()] = r
+    if latest:
+        return "changes" if any(asks_changes(r) for r in latest.values()) else "ok"
     return "stale" if marks else "none"
 
 
@@ -451,8 +468,7 @@ def readiness(ctx: dict, opts: Options) -> tuple[str, str]:
         return READY_PENDING, f"Draft PR. Mark it ready when it is: gh pr ready {number}"
     author = (pr.get("user") or {}).get("login") or ""
     if author_kind(author, opts.bot_authors) == "Human":
-        gaps = [f.problem.replace("Section ", "").replace("Missing section ", "missing ").rstrip(".")
-                for f in check_template(repo, number, pr.get("body") or "", ctx["files"])]
+        gaps = [f.gap or f.problem.rstrip(".") for f in check_template(repo, number, pr.get("body") or "", ctx["files"])]
         if gaps:
             return READY_PENDING, _fit(gaps, "PR body: ", f". Fix: gh pr edit {number}")
     state = marker_state(ctx["reviews"], head, (author, *opts.trusted_reviewers))
@@ -466,6 +482,8 @@ def readiness(ctx: dict, opts: Options) -> tuple[str, str]:
 
 def is_fork(repo: str, pr: dict) -> bool:
     head = pr.get("head") or {}
+    # No repo key at all (a trimmed payload): assume same-repo; a fork would 403 into the "not posted" path anyway.
+    # A null repo is a deleted fork, and counts as one.
     if "repo" not in head:
         return False
     return ((head.get("repo") or {}).get("full_name") or "").lower() != repo.lower()
@@ -532,20 +550,16 @@ class Api:
     def __init__(self, token: str, fetch=None):
         self.token, self.fetch = token, fetch or _urllib_fetch
 
+    def _headers(self) -> dict:
+        return {"Authorization": f"Bearer {self.token}", "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "naptic-sdlc-conformance"}
+
     def get(self, path: str, params: dict | None = None):
         url = API + path + ("?" + urllib.parse.urlencode(params) if params else "")
-        return self.fetch(url, {"Authorization": f"Bearer {self.token}",
-                                "Accept": "application/vnd.github+json",
-                                "X-GitHub-Api-Version": "2022-11-28",
-                                "User-Agent": "naptic-sdlc-conformance"})
+        return self.fetch(url, self._headers())
 
     def post(self, path: str, payload: dict):
-        return self.fetch(API + path, {"Authorization": f"Bearer {self.token}",
-                                       "Accept": "application/vnd.github+json",
-                                       "Content-Type": "application/json",
-                                       "X-GitHub-Api-Version": "2022-11-28",
-                                       "User-Agent": "naptic-sdlc-conformance"},
-                          json.dumps(payload).encode())
+        return self.fetch(API + path, {**self._headers(), "Content-Type": "application/json"}, json.dumps(payload).encode())
 
     def paged(self, path: str) -> list:
         items, page = [], 1

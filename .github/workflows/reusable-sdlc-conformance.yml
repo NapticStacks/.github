@@ -6,7 +6,8 @@
 #   sdlc / sdlc-conformance
 #
 # v2 adds a second job, `sdlc / sdlc-ready`, which posts the `sdlc/ready` commit
-# status on the PR head (Claude Skins pops only ready PRs). The caller template and
+# status on the PR head (Claude Skins reads it to surface only reviewed PRs). It is
+# advisory: a PR that edits its own caller can set it, so never make it a required check. The caller template and
 # the v1 -> v2 migration live in .github/workflows/README.md ("Caller example -- sdlc
 # conformance"). The caller must grant the statuses permission for the status to
 # post; without it the job warns "not posted" and stays green.
@@ -18,7 +19,8 @@
 #
 # SAFETY: no PR code is checked out, and the PR title/body never reach a shell --
 # the script reads them from the API. Only the repo name and PR number cross into
-# env. No secrets are requested; the caller's read-only GITHUB_TOKEN is enough.
+# env. No secrets are requested. sdlc-conformance runs read-only; only sdlc-ready
+# needs the statuses permission (write) from the caller.
 # Exit 2 (checker error) is red in any mode and says "gate bug, not your PR".
 #
 # All `uses:` are pinned to immutable commit SHAs. Bump only via a reviewed PR.
@@ -124,11 +126,15 @@ jobs:
   # Readiness (v2): posts sdlc/ready = success | pending on the head SHA. Advisory:
   # exits 0 whatever the verdict, and warns "not posted" on a fork PR or when the
   # caller didn't grant the statuses permission. Exit 2 still means a gate bug.
+  # No job-level permissions on purpose: a called job that requests a scope its caller
+  # did not grant fails at startup, which would turn every v2 caller without
+  # the statuses permission red. Inheriting lets that case warn "not posted" and stay green.
   sdlc-ready:
     name: sdlc-ready
     if: ${{ github.event.pull_request != null }}
     runs-on: ubuntu-latest
     steps:
+      # Keep the next three steps in step with sdlc-conformance's (a test checks they match).
       - name: Validate gate_ref
         env:
           GATE_REF: ${{ inputs.gate_ref }}

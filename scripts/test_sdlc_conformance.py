@@ -826,9 +826,18 @@ def test_ready_workflow_v1_inputs_still_accepted():
 README = Path(__file__).parent.parent / ".github" / "workflows" / "README.md"
 
 
+def readme_v2_caller() -> str:
+    """The v2 caller YAML block in the README, or a clear failure naming what moved."""
+    text = README.read_text()
+    assert "(v2, current):" in text, "README lost its '(v2, current):' caller heading"
+    after = text.split("(v2, current):", 1)[1]
+    assert "```yaml" in after, "no ```yaml block after the v2 caller heading"
+    return after.split("```yaml", 1)[1].split("```", 1)[0]
+
+
 def test_ready_v2_caller_reruns_on_every_event_that_can_flip_readiness():
     """codex 3a: back-to-draft and an edited review must re-post, or a stale success lingers."""
-    caller = README.read_text().split("(v2, current):", 1)[1].split("```yaml", 1)[1].split("```", 1)[0]
+    caller = readme_v2_caller()
     pr_types = caller.split("pull_request:", 1)[1].split("\n", 2)[1]
     review_types = caller.split("pull_request_review:", 1)[1].split("\n", 2)[1]
     for t in ("opened", "edited", "synchronize", "reopened", "ready_for_review", "converted_to_draft"):
@@ -838,3 +847,57 @@ def test_ready_v2_caller_reruns_on_every_event_that_can_flip_readiness():
     assert "statuses: write" in caller and "@sdlc-conformance-v2" in caller
     # ${{ }} inside a {...} flow mapping is invalid YAML: concurrency must be block style.
     assert "{group:" not in caller
+
+
+# --- /naptic-review round (.github#9, napticstack-skills#384) ---------------------------
+
+def test_ready_author_cannot_clear_a_trusted_reviewers_change_request():
+    reviews = [marker("maydaycyber", HEAD, state="CHANGES_REQUESTED", at="2026-10-13T10:00:00Z"),
+               marker("example-dev", HEAD, at="2026-10-13T11:00:00Z")]
+    state, desc = sc.readiness(ready_ctx(reviews), sc.Options())
+    assert state == sc.READY_PENDING and "changes" in desc.lower()
+
+
+def test_ready_a_later_trusted_marker_clears_its_own_change_request():
+    reviews = [marker("maydaycyber", HEAD, state="CHANGES_REQUESTED", at="2026-10-13T10:00:00Z"),
+               marker("maydaycyber", HEAD, state="APPROVED", at="2026-10-13T11:00:00Z")]
+    assert sc.readiness(ready_ctx(reviews), sc.Options())[0] == sc.READY_SUCCESS
+
+
+def test_ready_self_review_posted_as_comment_with_request_changes_verdict_is_pending():
+    body = "## Three-lens review — REQUEST CHANGES (posted as a comment: own PR)\n\n- [MAJOR] ..."
+    state, _ = sc.readiness(ready_ctx([marker("example-dev", HEAD, body=body)]), sc.Options())
+    assert state == sc.READY_PENDING
+
+
+def test_ready_a_dismissed_change_request_falls_back_to_the_earlier_marker():
+    reviews = [marker("maydaycyber", HEAD, at="2026-10-13T10:00:00Z"),
+               marker("maydaycyber", HEAD, state="DISMISSED", at="2026-10-13T11:00:00Z")]
+    assert sc.readiness(ready_ctx(reviews), sc.Options())[0] == sc.READY_SUCCESS
+
+
+def test_ready_bot_pr_skips_the_template_but_still_needs_the_marker():
+    ctx = ready_ctx(body="Bumps foo.", user={"login": "naptic-hp-agent[bot]"})
+    opts = sc.Options(bot_authors=("naptic-hp-agent[bot]",), trusted_reviewers=("maydaycyber",))
+    assert sc.readiness(ctx, opts)[0] == sc.READY_PENDING  # no marker yet: the template skip doesn't make it ready
+    ctx = ready_ctx([marker("maydaycyber", HEAD)], body="Bumps foo.", user={"login": "naptic-hp-agent[bot]"})
+    assert sc.readiness(ctx, opts)[0] == sc.READY_SUCCESS
+
+
+def test_ready_deleted_fork_counts_as_a_fork():
+    assert sc.is_fork("NapticStacks/example", {"head": {"sha": HEAD, "repo": None}}) is True
+    assert sc.is_fork("NapticStacks/example", {"head": {"sha": HEAD}}) is False
+
+
+def test_ready_gap_text_comes_from_the_finding_not_its_wording():
+    findings = sc.check_template(REPO, 42, "## Issue\nCloses #7\n", [])
+    assert [f.gap for f in findings] == ["missing Tests named in the issue", "missing Verification evidence",
+                                         "missing /review findings"]
+
+
+def test_ready_job_guards_gate_ref_like_the_conformance_job():
+    """The ready job copies three setup steps; the gate_ref guard and the pinned checkout must stay identical."""
+    jobs = WORKFLOW.read_text().split("\n  sdlc-ready:", 1)
+    conformance, ready = jobs[0].split("\n  sdlc-conformance:", 1)[1], jobs[1]
+    pick = lambda block: [l.strip() for l in block.splitlines() if "GATE_REF\" =~" in l or "actions/checkout@" in l or "actions/setup-python@" in l]
+    assert pick(conformance) and pick(conformance) == pick(ready)
