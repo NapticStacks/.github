@@ -151,7 +151,9 @@ on:
   pull_request_review:
     types: [submitted, edited, dismissed]
 permissions: {contents: read, pull-requests: read, issues: read, statuses: write}
-concurrency: {group: sdlc-${{ github.event.pull_request.number }}, cancel-in-progress: true}
+concurrency:
+  group: sdlc-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 jobs:
   sdlc:
     uses: NapticStacks/.github/.github/workflows/reusable-sdlc-conformance.yml@sdlc-conformance-v2

@@ -836,3 +836,5 @@ def test_ready_v2_caller_reruns_on_every_event_that_can_flip_readiness():
     for t in ("submitted", "edited", "dismissed"):
         assert t in review_types, t
     assert "statuses: write" in caller and "@sdlc-conformance-v2" in caller
+    # ${{ }} inside a {...} flow mapping is invalid YAML: concurrency must be block style.
+    assert "{group:" not in caller
