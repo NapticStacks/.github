@@ -1,0 +1,7 @@
+{
+  "name": "Naptic SDLC conformance (V1)",
+  "description": "Checks each PR against the Naptic SDLC V1 gate: issue link, template, size, review, tier, builder of record and self-review. Pinned to sdlc-conformance-v3.",
+  "iconName": "octicon checklist",
+  "categories": ["Automation"],
+  "filePatterns": []
+}

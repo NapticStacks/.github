@@ -5,6 +5,11 @@
 # emitted check context is deterministic:
 #   sdlc / sdlc-conformance
 #
+# v3 (SDLC V1) adds the checks `tier`, `builder-of-record` and `self-review`, and
+# the template sections Builder, Workstation, Session and Tier. They skip PRs
+# created before `cutover`. New inputs: `builders`, `security_signers`, `cutover`.
+# The org caller template is workflow-templates/sdlc.yml.
+#
 # v2 adds a second job, `sdlc / sdlc-ready`, which posts the `sdlc/ready` commit
 # status on the PR head (Claude Skins reads it to surface only reviewed PRs). It is
 # advisory: a PR that edits its own caller can set it, so never make it a required check. The caller template and
@@ -58,10 +63,22 @@ on:
       phase_09c_on_infra:
         type: boolean
         default: false
+      builders:
+        description: "v3: comma-separated human engineer roster. The PR body's Builder: login must be on it. Empty = only checked to be a human GitHub account (a note)."
+        type: string
+        default: ""
+      security_signers:
+        description: "v3: comma-separated Security Ops logins, primary first, then the backup who signs when the primary built it. Empty = tier:high always fails."
+        type: string
+        default: ""
+      cutover:
+        description: "v3: PRs created before this UTC time skip the V1 checks and sections."
+        type: string
+        default: "2026-10-16T00:00:00Z"
       gate_ref:
         description: "Ref of NapticStacks/.github to load scripts/sdlc_conformance.py from. Keep in step with the caller's @ref."
         type: string
-        default: sdlc-conformance-v2
+        default: sdlc-conformance-v3
 
 jobs:
   sdlc-conformance:
@@ -109,6 +126,9 @@ jobs:
           OPT_CHANGELOG: ${{ inputs.changelog }}
           OPT_VERSION: ${{ inputs.version_bump }}
           OPT_09C: ${{ inputs.phase_09c_on_infra }}
+          BUILDERS: ${{ inputs.builders }}
+          SIGNERS: ${{ inputs.security_signers }}
+          CUTOVER: ${{ inputs.cutover }}
         run: |
           set -euo pipefail
           FLAGS=()
@@ -121,6 +141,9 @@ jobs:
             --mode "$MODE" \
             --trusted-reviewers "$TRUSTED" \
             --bot-authors "$BOTS" \
+            --builders "$BUILDERS" \
+            --security-signers "$SIGNERS" \
+            --cutover "$CUTOVER" \
             "${FLAGS[@]}"
 
   # Readiness (v2): posts sdlc/ready = success | pending on the head SHA. Advisory:
@@ -163,8 +186,14 @@ jobs:
           SDLC_PR: ${{ github.event.pull_request.number }}
           TRUSTED: ${{ inputs.trusted_reviewers }}
           BOTS: ${{ inputs.bot_authors }}
+          BUILDERS: ${{ inputs.builders }}
+          SIGNERS: ${{ inputs.security_signers }}
+          CUTOVER: ${{ inputs.cutover }}
         run: |
           set -euo pipefail
           python gate/scripts/sdlc_conformance.py --post-ready \
             --trusted-reviewers "$TRUSTED" \
-            --bot-authors "$BOTS"
+            --bot-authors "$BOTS" \
+            --builders "$BUILDERS" \
+            --security-signers "$SIGNERS" \
+            --cutover "$CUTOVER"

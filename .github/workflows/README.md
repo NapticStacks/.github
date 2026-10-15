@@ -23,8 +23,8 @@ names in `project-manager` → `config/repo_review_policy.json` are
 | `ci / SCA (pip-audit)` | reusable-ci-python | evidence |
 | `ci / SCA (npm-audit)` | reusable-ci-node | gate (Node) |
 | `test-count / test-count guard` | reusable-test-count-guard | gate (PR-only) |
-| `sdlc / sdlc-conformance` | reusable-sdlc-conformance | warn by default; block per repo (pinned to `@sdlc-conformance-v1` or `-v2`) |
-| `sdlc / sdlc-ready` + commit status `sdlc/ready` | reusable-sdlc-conformance (v2 only) | advisory, never required; Claude Skins reads it |
+| `sdlc / sdlc-conformance` | reusable-sdlc-conformance | warn by default; block per repo (pinned to `@sdlc-conformance-v1`, `-v2` or `-v3`) |
+| `sdlc / sdlc-ready` + commit status `sdlc/ready` | reusable-sdlc-conformance (v2 and later) | advisory, never required; Claude Skins reads it |
 
 GHAS code-scanning is not enabled on these repos, so scanners gate via exit code
 and retain SARIF/JSON as 90-day artifacts (SOC 2 evidence) rather than uploading
@@ -142,12 +142,17 @@ is loaded from and defaults to `v1` — keep it in step with the caller's `@ref`
 
 ## Caller example — sdlc conformance
 
-Copy as `.github/workflows/sdlc.yml` (v2, current):
+The full org template is [`workflow-templates/sdlc.yml`](../../workflow-templates/sdlc.yml). GitHub offers it under
+**Actions → New workflow** in every NapticStacks repo. WS-11 of the SDLC V1 rollout (naptic-sdlc#27) copies it
+into each client repo as `.github/workflows/sdlc.yml` and fills in `builders` and `security_signers` there.
+Those logins stay in the private client repo: this repo is public.
+
+Copy as `.github/workflows/sdlc.yml` (v3, current):
 
 ```yaml
 on:
   pull_request:
-    types: [opened, edited, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled]
+    types: [opened, edited, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled, review_requested]
   pull_request_review:
     types: [submitted, edited, dismissed]
 permissions: {contents: read, pull-requests: read, issues: read, statuses: write}
@@ -156,22 +161,59 @@ concurrency:
   cancel-in-progress: true
 jobs:
   sdlc:
-    uses: NapticStacks/.github/.github/workflows/reusable-sdlc-conformance.yml@sdlc-conformance-v2
-    with: {mode: warn}
+    uses: NapticStacks/.github/.github/workflows/reusable-sdlc-conformance.yml@sdlc-conformance-v3
+    with:
+      mode: warn
+      builders: "<engineer roster logins>"
+      security_signers: "<Security Ops login>,<backup login>"
 ```
 
-### v1 / v2 compatibility
+### What v3 adds (SDLC V1)
 
-| | v1 caller (`@sdlc-conformance-v1`) | v2 caller (`@sdlc-conformance-v2`) |
-|---|---|---|
-| `sdlc / sdlc-conformance` | yes, unchanged | yes, same checks and exit codes |
-| `sdlc / sdlc-ready` job | no | yes |
-| `sdlc/ready` commit status | no | yes, when the caller grants `statuses: write` |
-| Inputs | all v1 inputs | all v1 inputs, same names and defaults; `gate_ref` defaults to `sdlc-conformance-v2` |
-| Without `statuses: write` | n/a | `sdlc-ready` warns "not posted" and stays green |
-| Fork PR | n/a | "not posted" (the token is read-only) |
+All of it skips PRs created before `cutover` (default `2026-10-16T00:00:00Z`). Those finish under v2 rules.
 
-v1 is not deprecated. Its tag never moves, so a v1 caller keeps working exactly as before.
+- **`tier`:** the highest `tier:*` label on the PR or its same-repo linked issues. None is a note (counts as medium).
+  `tier:high` fails without a comment carrying `<!-- sdlc:security-signoff v1 -->` on the linked issue or the PR,
+  from the first `security_signers` login (or a later one when the first one is the builder). Nobody signs off their
+  own work. No `security_signers` set means high always fails.
+- **`builder-of-record`:** a `Builder: @login` line in the body (comments and code fences don't count). The login
+  must be a real GitHub user account, not a bot, and on `builders`. With no `builders` set, that last part is a note.
+  Bot and swarm PRs need the line too. Dependabot gets a note.
+- **`self-review`:** a comment by the builder with `<!-- sdlc:self-review v1 -->` and the full 40-character head
+  SHA, or a review by the builder carrying the marker on the head commit. A push makes it stale. `/closer` posts it.
+- **Template:** post-cutover human PRs also need `## Builder`, `## Workstation`, `## Session` and `## Tier`
+  (see the org [PR template](../pull_request_template.md)).
+- **`review_requested`** is a new caller trigger: `/closer` requests the reviewer right after it posts the marker,
+  so the gate re-runs and sees it.
+- **Known gaps:** a tier label changed on the issue (not the PR) or a new comment doesn't re-run the check by itself.
+  The next PR event, or a re-run, picks it up.
+
+### Dependabot config template
+
+[`templates/dependabot.yml`](../../templates/dependabot.yml) covers npm, pip and GitHub Actions. Copy it to the
+repo's `.github/dependabot.yml` and delete the ecosystems the repo doesn't use. SAST and DAST are not here: Sugam
+sets that standard (naptic-sdlc#6).
+
+### v1 / v2 / v3 compatibility
+
+| | v1 caller (`@sdlc-conformance-v1`) | v2 caller (`@sdlc-conformance-v2`) | v3 caller (`@sdlc-conformance-v3`) |
+|---|---|---|---|
+| `sdlc / sdlc-conformance` | yes, unchanged | yes, same checks and exit codes | yes; adds `tier`, `builder-of-record`, `self-review` for post-cutover PRs |
+| `sdlc / sdlc-ready` job | no | yes | yes; post-cutover PRs also need the V1 template sections |
+| `sdlc/ready` commit status | no | yes, when the caller grants `statuses: write` | same as v2 |
+| Inputs | all v1 inputs | all v1 inputs, same names and defaults; `gate_ref` defaults to `sdlc-conformance-v2` | all v2 inputs, plus `builders`, `security_signers`, `cutover`; `gate_ref` defaults to `sdlc-conformance-v3` |
+| Without `statuses: write` | n/a | `sdlc-ready` warns "not posted" and stays green | same as v2 |
+| Fork PR | n/a | "not posted" (the token is read-only) | same as v2 |
+
+v1 and v2 are not deprecated. Their tags never move, so those callers keep working exactly as before.
+
+### Migrating v2 → v3
+
+1. Change `@sdlc-conformance-v2` to `@sdlc-conformance-v3` (once that tag exists: it is cut on the merge commit of the v3 PR).
+2. Add `review_requested` to the `pull_request` types.
+3. Set `builders` and `security_signers` under `with:`.
+4. If the caller pins `gate_ref`, set it to `sdlc-conformance-v3` too (or drop it to take the default).
+5. Update the repo's PR template to carry the Builder, Workstation, Session and Tier sections.
 
 ### Migrating v1 → v2
 
@@ -191,11 +233,11 @@ v1 is not deprecated. Its tag never moves, so a v1 caller keeps working exactly 
 
 **`sdlc/ready` is advisory, never an authorization.** On `pull_request`, GitHub runs the caller from the PR's own head, so a PR that edits its caller can post the status itself, as `github-actions[bot]` like any run. Readers take the newest status from that creator, but must never use it to gate a merge, an auto-merge or a deploy.
 
-Pin `@sdlc-conformance-v2` (or `-v1`), not `@v1`: the gate has its own tag so it can move without moving the shared one.
+Pin `@sdlc-conformance-v3` (or `-v2`, `-v1`), not `@v1`: the gate has its own tag so it can move without moving the shared one.
 
 **Local pre-push check:** from a clone of `NapticStacks/.github` (Python 3.11+, `gh auth login` done), run `python scripts/sdlc_conformance.py --pr <owner/repo#N>`. It uses the same code path and the same exit codes as CI.
 
-**Before a repo turns on `mode: block`:** on `pull_request`, GitHub reads the caller file from the PR head, so a PR can edit its own `sdlc.yml` (reviewers, mode). Block mode is only a control once that file is protected: CODEOWNERS `@maydaycyber` on `.github/workflows/**` with required code-owner review (or an org required-workflow ruleset), plus a tag-protection ruleset on `sdlc-conformance-v*` here. The gate already refuses a `gate_ref` that isn't an `sdlc-conformance-vN` tag or a full SHA.
+**Before a repo turns on `mode: block`:** on `pull_request`, GitHub reads the caller file from the PR head, so a PR can edit its own `sdlc.yml` (reviewers, mode, builders, cutover). Block mode is only a control once that file is protected: CODEOWNERS `@maydaycyber` on `.github/workflows/**` with required code-owner review (or an org required-workflow ruleset), plus a tag-protection ruleset on `sdlc-conformance-v*` here. The gate already refuses a `gate_ref` that isn't an `sdlc-conformance-vN` tag or a full SHA.
 
 ## Rollout discipline
 

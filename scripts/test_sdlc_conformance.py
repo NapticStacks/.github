@@ -283,6 +283,8 @@ def every_finding():
     ctx["files"].append("cdk/x.py")
     out += run(ctx, sc.Options(unf_phase=True, changelog=True, version_bump=True, phase_09c_on_infra=True),
                issue_lookup=lambda n: None)
+    # v3: a post-cutover PR with no Builder line, a tier:high label and no markers.
+    out += run(v1_ctx(labels=("tier:high",), comments=[], body="## Issue\nCloses #7\n"), V1_OPTS)
     return out
 
 
@@ -406,7 +408,7 @@ def test_main_exit_2_on_checker_error(monkeypatch, capsys):
 
 def test_main_block_mode_returns_1(monkeypatch, capsys):
     ctx = make_ctx(additions=5000)
-    monkeypatch.setattr(sc, "gather", lambda api, repo, n: ctx)
+    monkeypatch.setattr(sc, "gather", lambda api, repo, n, *_: ctx)
     monkeypatch.setattr(sc, "issue_lookup_for", lambda api, repo: lookup_ok)
     monkeypatch.setenv("GH_TOKEN", "t0ken")
     assert sc.main(["--pr", "NapticStacks/example#42", "--mode", "block"]) == sc.EXIT_VIOLATIONS
@@ -415,7 +417,7 @@ def test_main_block_mode_returns_1(monkeypatch, capsys):
 
 def test_main_reads_repo_and_number_from_env(monkeypatch):
     seen = {}
-    monkeypatch.setattr(sc, "gather", lambda api, repo, n: seen.update(repo=repo, n=n) or make_ctx())
+    monkeypatch.setattr(sc, "gather", lambda api, repo, n, *_: seen.update(repo=repo, n=n) or make_ctx())
     monkeypatch.setattr(sc, "issue_lookup_for", lambda api, repo: lookup_ok)
     monkeypatch.setenv("GH_TOKEN", "t0ken")
     monkeypatch.setenv("SDLC_REPO", "NapticStacks/example")
@@ -459,7 +461,7 @@ def test_workflow_pins_every_action_to_a_sha():
 
 def test_workflow_defaults_to_its_own_tag_and_job_name():
     text = WORKFLOW.read_text()
-    assert "default: sdlc-conformance-v2" in text
+    assert "default: sdlc-conformance-v3" in text
     assert "name: sdlc-conformance" in text
 
 
@@ -560,7 +562,7 @@ def test_malformed_refs_are_not_links(ref):
 
 
 def test_reporting_failure_is_exit_2(monkeypatch, tmp_path):
-    monkeypatch.setattr(sc, "gather", lambda api, repo, n: make_ctx())
+    monkeypatch.setattr(sc, "gather", lambda api, repo, n, *_: make_ctx())
     monkeypatch.setattr(sc, "issue_lookup_for", lambda api, repo: lookup_ok)
     monkeypatch.setenv("GH_TOKEN", "t0ken")
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "missing-dir" / "summary.md"))
@@ -829,8 +831,8 @@ README = Path(__file__).parent.parent / ".github" / "workflows" / "README.md"
 def readme_v2_caller() -> str:
     """The v2 caller YAML block in the README, or a clear failure naming what moved."""
     text = README.read_text()
-    assert "(v2, current):" in text, "README lost its '(v2, current):' caller heading"
-    after = text.split("(v2, current):", 1)[1]
+    assert "(v3, current):" in text, "README lost its '(v3, current):' caller heading"
+    after = text.split("(v3, current):", 1)[1]
     assert "```yaml" in after, "no ```yaml block after the v2 caller heading"
     return after.split("```yaml", 1)[1].split("```", 1)[0]
 
@@ -844,7 +846,8 @@ def test_ready_v2_caller_reruns_on_every_event_that_can_flip_readiness():
         assert t in pr_types, t
     for t in ("submitted", "edited", "dismissed"):
         assert t in review_types, t
-    assert "statuses: write" in caller and "@sdlc-conformance-v2" in caller
+    assert "statuses: write" in caller and "@sdlc-conformance-v3" in caller
+    assert "review_requested" in pr_types  # /closer requests the reviewer right after the self-review marker
     # ${{ }} inside a {...} flow mapping is invalid YAML: concurrency must be block style.
     assert "{group:" not in caller
 
@@ -901,3 +904,422 @@ def test_ready_job_guards_gate_ref_like_the_conformance_job():
     conformance, ready = jobs[0].split("\n  sdlc-conformance:", 1)[1], jobs[1]
     pick = lambda block: [l.strip() for l in block.splitlines() if "GATE_REF\" =~" in l or "actions/checkout@" in l or "actions/setup-python@" in l]
     assert pick(conformance) and pick(conformance) == pick(ready)
+
+
+# --- v3: V1 checks (tier, builder-of-record, self-review) --------------------------------
+# All logins below are made up. The real roster lives in each private caller's `builders:`.
+
+V1_CREATED = "2026-10-20T09:00:00Z"
+BUILDER = "example-dev"
+SIGNER, BACKUP_SIGNER = "example-secops", "example-lead"
+V1_SECTIONS = ("\n## Builder\nBuilder: @example-dev\n\n## Workstation\nexample-box\n\n"
+               "## Session\nhttps://claude.ai/code/session_example\n\n## Tier\ntier:low\n")
+
+
+def self_review(login=BUILDER, sha=HEAD, body=None, at="2026-10-20T10:00:00Z"):
+    text = body if body is not None else f"{sc.SELF_REVIEW_MARKER}\nSelf-review done on head {sha}.\n"
+    return {"user": {"login": login}, "body": text, "created_at": at}
+
+
+def signoff(login=SIGNER, at="2026-10-19T10:00:00Z"):
+    return {"user": {"login": login}, "body": f"{sc.SECURITY_SIGNOFF_MARKER}\nSigned off.", "created_at": at}
+
+
+def v1_ctx(labels=("tier:low",), comments=None, issues=None, builder_account="User", **pr_overrides):
+    """A post-cutover PR that passes every v1 check."""
+    ctx = make_ctx(**pr_overrides)
+    pr = ctx["pr"]
+    if "created_at" not in pr_overrides:
+        pr["created_at"] = V1_CREATED
+    if "body" not in pr_overrides:
+        pr["body"] = pr["body"].replace("Closes #7\n", "Closes #7\n" + V1_SECTIONS)
+    if "labels" not in pr_overrides:
+        pr["labels"] = [{"name": l} for l in labels]
+    ctx["comments"] = [self_review()] if comments is None else comments
+    ctx["linked_issues"] = {7: {"labels": [], "comments": []}} if issues is None else issues
+    m = sc.BUILDER_RE.search(sc.COMMENT_RE.sub("", pr["body"]))
+    if m and builder_account is not None:
+        ctx["builder_account"] = {"login": m.group(1), "type": builder_account}
+    elif m:
+        ctx["builder_account"] = None
+    return ctx
+
+
+V1_OPTS = sc.Options(builders=(BUILDER, "example-other"), security_signers=(SIGNER, BACKUP_SIGNER))
+
+
+def v1run(ctx, opts=V1_OPTS, **kw):
+    return run(ctx, opts, **kw)
+
+
+def test_v1_good_pr_has_no_findings():
+    assert v1run(v1_ctx()) == []
+
+
+def test_v1_checks_are_new_check_ids():
+    for cid in ("tier", "builder-of-record", "self-review"):
+        assert cid in sc.CHECK_IDS
+
+
+def test_v1_cutover_default_is_2026_10_16_utc():
+    assert sc.CUTOVER == "2026-10-16T00:00:00Z"
+    assert sc.Options().cutover == sc.CUTOVER
+
+
+@pytest.mark.parametrize("created", ["2026-10-15T23:59:59Z", "2026-10-01T00:00:00Z"])
+def test_v1_checks_skip_prs_created_before_cutover(created):
+    ctx = v1_ctx(created_at=created, labels=(), comments=[],
+                 body=make_ctx()["pr"]["body"])  # no Builder line, no tier, no marker, no new sections
+    assert v1run(ctx) == []
+
+
+def test_v1_checks_run_on_a_pr_created_exactly_at_cutover():
+    ctx = v1_ctx(created_at="2026-10-16T00:00:00Z", comments=[])
+    assert "self-review" in checks(v1run(ctx), sc.VIOLATION)
+
+
+def test_v1_missing_created_at_counts_as_post_cutover():
+    ctx = v1_ctx(comments=[])
+    del ctx["pr"]["created_at"]
+    assert "self-review" in checks(v1run(ctx), sc.VIOLATION)
+
+
+def test_v1_cutover_is_configurable():
+    ctx = v1_ctx(comments=[])
+    late = sc.Options(builders=V1_OPTS.builders, security_signers=V1_OPTS.security_signers,
+                      cutover="2026-11-01T00:00:00Z")
+    assert v1run(ctx, late) == []
+
+
+def test_v1_bad_cutover_is_a_checker_error(monkeypatch, capsys):
+    monkeypatch.setattr(sc, "gather", lambda *a, **k: make_ctx())
+    monkeypatch.setenv("GH_TOKEN", "t0ken")
+    assert sc.main(["--pr", "NapticStacks/example#42", "--cutover", "next tuesday"]) == sc.EXIT_CHECKER_ERROR
+
+
+# tier
+
+def test_v1_no_tier_label_is_a_medium_note():
+    findings = v1run(v1_ctx(labels=()))
+    assert [(f.check, f.level) for f in findings] == [("tier", sc.NOTE)]
+    assert "medium" in findings[0].problem
+
+
+def test_v1_tier_from_the_linked_issue_counts():
+    ctx = v1_ctx(labels=(), issues={7: {"labels": ["tier:low"], "comments": []}})
+    assert v1run(ctx) == []
+
+
+def test_v1_highest_tier_wins_across_pr_and_issue():
+    ctx = v1_ctx(labels=("tier:low",), issues={7: {"labels": ["tier:high"], "comments": []}})
+    assert "tier" in checks(v1run(ctx), sc.VIOLATION)
+
+
+def test_v1_effective_tier():
+    assert sc.effective_tier(["tier:low", "tier:medium"]) == "medium"
+    assert sc.effective_tier(["bug", "TIER:HIGH"]) == "high"
+    assert sc.effective_tier([]) is None
+
+
+def test_v1_high_without_signoff_fails():
+    findings = v1run(v1_ctx(labels=("tier:high",)))
+    [f] = [f for f in findings if f.check == "tier"]
+    assert f.level == sc.VIOLATION and "sign-off" in f.problem
+
+
+def test_v1_high_with_signoff_on_the_issue_passes():
+    ctx = v1_ctx(labels=("tier:high",), issues={7: {"labels": [], "comments": [signoff()]}})
+    assert v1run(ctx) == []
+
+
+def test_v1_high_with_signoff_on_the_pr_passes():
+    ctx = v1_ctx(labels=("tier:high",), comments=[self_review(), signoff()])
+    assert v1run(ctx) == []
+
+
+@pytest.mark.parametrize("comment", [
+    signoff(login="drive-by-user"),                                       # not a signer
+    {"user": {"login": SIGNER}, "body": "LGTM, signed off", "created_at": "2026-10-19T10:00:00Z"},  # no marker
+    signoff(login=BACKUP_SIGNER),                                         # backup only when the primary built it
+])
+def test_v1_high_signoff_that_does_not_count(comment):
+    ctx = v1_ctx(labels=("tier:high",), issues={7: {"labels": [], "comments": [comment]}})
+    assert "tier" in checks(v1run(ctx), sc.VIOLATION)
+
+
+def test_v1_backup_signer_counts_when_the_primary_built_it():
+    body = make_ctx()["pr"]["body"].replace("Closes #7\n", "Closes #7\n" + V1_SECTIONS.replace(BUILDER, SIGNER))
+    ctx = v1_ctx(labels=("tier:high",), body=body, comments=[self_review(login=SIGNER)],
+                 issues={7: {"labels": [], "comments": [signoff(login=BACKUP_SIGNER)]}})
+    opts = sc.Options(builders=(SIGNER,), security_signers=(SIGNER, BACKUP_SIGNER))
+    assert v1run(ctx, opts) == []
+
+
+def test_v1_builder_cannot_sign_off_their_own_high_tier_work():
+    body = make_ctx()["pr"]["body"].replace("Closes #7\n", "Closes #7\n" + V1_SECTIONS.replace(BUILDER, SIGNER))
+    ctx = v1_ctx(labels=("tier:high",), body=body, comments=[self_review(login=SIGNER)],
+                 issues={7: {"labels": [], "comments": [signoff(login=SIGNER)]}})
+    opts = sc.Options(builders=(SIGNER,), security_signers=(SIGNER, BACKUP_SIGNER))
+    assert "tier" in checks(v1run(ctx, opts), sc.VIOLATION)
+
+
+def test_v1_high_with_no_signers_configured_fails_closed():
+    ctx = v1_ctx(labels=("tier:high",), issues={7: {"labels": [], "comments": [signoff()]}})
+    opts = sc.Options(builders=V1_OPTS.builders)
+    [f] = [f for f in v1run(ctx, opts) if f.check == "tier"]
+    assert f.level == sc.VIOLATION and "security_signers" in f.cause
+
+
+# builder-of-record
+
+def _body_with_builder(line):
+    return make_ctx()["pr"]["body"].replace("Closes #7\n", "Closes #7\n" + V1_SECTIONS.replace(
+        "Builder: @example-dev", line))
+
+
+@pytest.mark.parametrize("line", ["Builder: @example-dev", "- Builder: @example-dev",
+                                  "**Builder:** @example-dev", "builder: example-dev", "Builder: @Example-Dev"])
+def test_v1_builder_line_forms(line):
+    assert sc.builder_of_record(_body_with_builder(line)).lower() == BUILDER
+
+
+def test_v1_builder_line_inside_a_comment_or_fence_does_not_count():
+    assert sc.builder_of_record("## Issue\nCloses #7\n<!-- Builder: @example-dev -->") is None
+    assert sc.builder_of_record("```\nBuilder: @example-dev\n```") is None
+
+
+def test_v1_missing_builder_line_fails():
+    ctx = v1_ctx(body=_body_with_builder("Builder: @"))
+    assert "builder-of-record" in checks(v1run(ctx), sc.VIOLATION)
+
+
+def test_v1_builder_not_on_the_roster_fails():
+    ctx = v1_ctx(body=_body_with_builder("Builder: @stranger"), comments=[self_review(login="stranger")])
+    [f] = [f for f in v1run(ctx) if f.check == "builder-of-record"]
+    assert f.level == sc.VIOLATION and "roster" in f.problem
+
+
+@pytest.mark.parametrize("login", ["naptic-hp-agent[bot]", "app/some-app", "dependabot[bot]"])
+def test_v1_bot_builder_fails(login):
+    ctx = v1_ctx(body=_body_with_builder(f"Builder: @{login}"), comments=[self_review(login=login)])
+    opts = sc.Options(builders=(*V1_OPTS.builders, login), security_signers=V1_OPTS.security_signers,
+                      bot_authors=("naptic-hp-agent[bot]",))
+    assert "builder-of-record" in checks(v1run(ctx, opts), sc.VIOLATION)
+
+
+def test_v1_builder_account_that_is_not_a_user_fails():
+    assert "builder-of-record" in checks(v1run(v1_ctx(builder_account="Bot")), sc.VIOLATION)
+    assert "builder-of-record" in checks(v1run(v1_ctx(builder_account="Organization")), sc.VIOLATION)
+
+
+def test_v1_builder_login_that_does_not_exist_fails():
+    [f] = [f for f in v1run(v1_ctx(builder_account=None)) if f.check == "builder-of-record"]
+    assert f.level == sc.VIOLATION and "exist" in f.problem
+
+
+def test_v1_no_roster_configured_is_a_note_for_a_real_user():
+    findings = v1run(v1_ctx(), sc.Options(security_signers=V1_OPTS.security_signers))
+    assert [(f.check, f.level) for f in findings] == [("builder-of-record", sc.NOTE)]
+
+
+def test_v1_swarm_pr_needs_the_builder_line_too():
+    ctx = v1_ctx(body="Closes #7", user={"login": "naptic-hp-agent[bot]"})
+    opts = sc.Options(builders=V1_OPTS.builders, bot_authors=("naptic-hp-agent[bot]",))
+    found = checks(v1run(ctx, opts), sc.VIOLATION)
+    assert "builder-of-record" in found and "template" not in found
+
+
+def test_v1_swarm_pr_with_a_human_builder_passes():
+    ctx = v1_ctx(body="Closes #7\nBuilder: @example-dev", user={"login": "naptic-hp-agent[bot]"})
+    opts = sc.Options(builders=V1_OPTS.builders, bot_authors=("naptic-hp-agent[bot]",))
+    assert v1run(ctx, opts) == []
+
+
+def test_v1_dependabot_builder_and_self_review_are_notes():
+    ctx = v1_ctx(body="Bumps foo from 1.0 to 1.1.", user={"login": "dependabot[bot]"}, comments=[])
+    findings = v1run(ctx, sc.Options(mode="block", builders=V1_OPTS.builders))
+    levels = {f.check: f.level for f in findings}
+    assert levels["builder-of-record"] == sc.NOTE and levels["self-review"] == sc.NOTE
+    assert sc.exit_code(findings, sc.Options(mode="block")) == sc.EXIT_OK
+
+
+# self-review
+
+def test_v1_no_marker_fails_and_names_closer():
+    [f] = [f for f in v1run(v1_ctx(comments=[])) if f.check == "self-review"]
+    assert f.level == sc.VIOLATION and "/closer" in f.fix
+
+
+def test_v1_marker_on_an_older_head_is_stale():
+    [f] = [f for f in v1run(v1_ctx(comments=[self_review(sha="c" * 40)])) if f.check == "self-review"]
+    assert f.level == sc.VIOLATION and "older" in f.problem
+
+
+def test_v1_marker_by_someone_else_does_not_count():
+    [f] = [f for f in v1run(v1_ctx(comments=[self_review(login="example-other")])) if f.check == "self-review"]
+    assert f.level == sc.VIOLATION and "builder" in f.problem
+
+
+def test_v1_marker_without_the_head_sha_does_not_count():
+    comment = self_review(body=f"{sc.SELF_REVIEW_MARKER}\nSelf-review done on {HEAD[:7]}.")
+    assert "self-review" in checks(v1run(v1_ctx(comments=[comment])), sc.VIOLATION)
+
+
+def test_v1_marker_login_match_ignores_case():
+    assert v1run(v1_ctx(comments=[self_review(login="Example-Dev")])) == []
+
+
+def test_v1_newest_marker_on_head_counts_even_after_a_stale_one():
+    comments = [self_review(sha="c" * 40, at="2026-10-20T09:00:00Z"), self_review(at="2026-10-20T11:00:00Z")]
+    assert v1run(v1_ctx(comments=comments)) == []
+
+
+def test_v1_marker_in_a_review_on_head_counts():
+    ctx = v1_ctx(comments=[])
+    ctx["reviews"].append({"user": {"login": BUILDER}, "state": "COMMENTED", "commit_id": HEAD,
+                           "submitted_at": "2026-10-20T10:00:00Z", "body": f"## Three-lens review\n{sc.SELF_REVIEW_MARKER}"})
+    assert v1run(ctx) == []
+
+
+def test_v1_marker_in_a_review_on_an_older_commit_is_stale():
+    ctx = v1_ctx(comments=[])
+    ctx["reviews"].append({"user": {"login": BUILDER}, "state": "COMMENTED", "commit_id": "c" * 40,
+                           "submitted_at": "2026-10-20T10:00:00Z", "body": f"{sc.SELF_REVIEW_MARKER} {HEAD}"})
+    assert "self-review" in checks(v1run(ctx), sc.VIOLATION)
+
+
+def test_v1_no_builder_line_means_self_review_cannot_pass():
+    [f] = [f for f in v1run(v1_ctx(body=_body_with_builder("Builder: @"))) if f.check == "self-review"]
+    assert f.level == sc.VIOLATION and "builder-of-record" in f.cause
+
+
+# template: the new V1 sections
+
+@pytest.mark.parametrize("name", ["Builder", "Workstation", "Session", "Tier"])
+def test_v1_template_needs_the_new_sections(name):
+    body = v1_ctx()["pr"]["body"].replace(f"## {name}\n", "## Something else\n")
+    found = [f for f in v1run(v1_ctx(body=body)) if f.check == "template"]
+    assert any(name in f.problem for f in found)
+
+
+def test_v1_template_sections_list():
+    assert sc.SECTIONS_V1 == ("Builder", "Workstation", "Session", "Tier")
+    assert sc.SECTIONS == ("Issue", "Tests named in the issue", "Verification evidence", "/review findings")
+
+
+def test_v1_pre_cutover_pr_is_not_failed_for_missing_new_sections():
+    assert run(make_ctx()) == []  # pr_good.json is pre-cutover and has none of the new sections
+
+
+def test_v1_readiness_uses_the_v1_template_after_cutover():
+    ctx = v1_ctx(body=make_ctx()["pr"]["body"] + "\nBuilder: @example-dev\n")
+    ctx["reviews"] = [marker(BUILDER, HEAD)]
+    state, desc = sc.readiness(ctx, V1_OPTS)
+    assert state == sc.READY_PENDING and "Workstation" in desc
+    ctx = v1_ctx(); ctx["reviews"] = [marker(BUILDER, HEAD)]
+    assert sc.readiness(ctx, V1_OPTS)[0] == sc.READY_SUCCESS
+
+
+# gather + CLI for v1
+
+def v1_routes(pr_extra=None, issue_labels=(), issue_comments=(), comments=(), user_type="User"):
+    routes = pr_routes(pr_extra={"created_at": V1_CREATED, **(pr_extra or {})})
+    routes = {"/repos/NapticStacks/example/issues/42/comments": paged(list(comments)),
+              "/repos/NapticStacks/example/issues/7/comments": paged(list(issue_comments)),
+              "/repos/NapticStacks/example/issues/7": {"number": 7, "labels": [{"name": l} for l in issue_labels]},
+              "/users/example-dev": {"login": "example-dev", "type": user_type},
+              **routes}
+    return routes
+
+
+def test_v1_gather_reads_comments_issue_labels_and_the_builder_account():
+    body = make_ctx()["pr"]["body"].replace("Closes #7\n", "Closes #7\n" + V1_SECTIONS)
+    transport = FakeTransport(v1_routes({"body": body}, issue_labels=["tier:medium"], comments=[self_review()]))
+    ctx = sc.gather(sc.Api("t0ken", transport), REPO, 42)
+    assert ctx["comments"][0]["user"]["login"] == BUILDER
+    assert ctx["linked_issues"][7]["labels"] == ["tier:medium"]
+    assert ctx["linked_issues"][7]["comments"] == []  # comments are read only for tier:high
+    assert ctx["builder_account"] == {"login": "example-dev", "type": "User"}
+
+
+def test_v1_gather_reads_issue_comments_for_high_tier():
+    transport = FakeTransport(v1_routes({"body": "Closes #7\nBuilder: @example-dev"},
+                                        issue_labels=["tier:high"], issue_comments=[signoff()]))
+    ctx = sc.gather(sc.Api("t0ken", transport), REPO, 42)
+    assert ctx["linked_issues"][7]["comments"][0]["user"]["login"] == SIGNER
+
+
+def test_v1_gather_unknown_builder_is_none():
+    routes = v1_routes({"body": "Closes #7\nBuilder: @example-dev"})
+    routes["/users/example-dev"] = 404
+    ctx = sc.gather(sc.Api("t0ken", FakeTransport(routes)), REPO, 42)
+    assert ctx["builder_account"] is None
+
+
+def test_v1_gather_skips_v1_reads_before_cutover():
+    transport = FakeTransport(pr_routes())  # pr_good.json is pre-cutover
+    ctx = sc.gather(sc.Api("t0ken", transport), REPO, 42)
+    assert not any("/comments" in u or "/users/" in u for u in transport.seen)
+    assert "comments" not in ctx
+
+
+def test_v1_gather_skips_cross_repo_and_missing_issues():
+    routes = v1_routes({"body": "Part of NapticStacks/other#3\nCloses #9\nBuilder: @example-dev"})
+    ctx = sc.gather(sc.Api("t0ken", FakeTransport(routes)), REPO, 42)
+    assert ctx["linked_issues"] == {}
+
+
+def test_v1_main_passes_the_new_flags(monkeypatch):
+    seen = {}
+    def fake_eval(ctx, opts, lookup, read):
+        seen["opts"] = opts
+        return []
+    monkeypatch.setattr(sc, "gather", lambda *a, **k: make_ctx())
+    monkeypatch.setattr(sc, "evaluate", fake_eval)
+    monkeypatch.setenv("GH_TOKEN", "t0ken")
+    assert sc.main(["--pr", "NapticStacks/example#42", "--builders", "a, b", "--security-signers", "s,j",
+                    "--cutover", "2026-11-01T00:00:00Z"]) == sc.EXIT_OK
+    assert seen["opts"].builders == ("a", "b") and seen["opts"].security_signers == ("s", "j")
+    assert seen["opts"].cutover == "2026-11-01T00:00:00Z"
+
+
+def test_v1_workflow_passes_the_new_inputs_through():
+    text = WORKFLOW.read_text()
+    for name in ("builders", "security_signers", "cutover"):
+        assert f"\n      {name}:" in text, name
+    run_steps = text.split("- name: Run the gate", 1)[1].split("\n  sdlc-ready:", 1)[0]
+    for flag in ("--builders", "--security-signers", "--cutover"):
+        assert flag in run_steps, flag
+    ready = text.split("\n  sdlc-ready:", 1)[1]
+    for flag in ("--builders", "--security-signers", "--cutover"):
+        assert flag in ready, flag
+    assert 'default: "2026-10-16T00:00:00Z"' in text
+
+
+ORG_TEMPLATE = Path(__file__).parent.parent / ".github" / "pull_request_template.md"
+CALLER_TEMPLATE = Path(__file__).parent.parent / "workflow-templates" / "sdlc.yml"
+
+
+def test_v1_org_pr_template_carries_every_section():
+    headings = [h.lower() for h in sc.sections(ORG_TEMPLATE.read_text())]
+    for name in (*sc.SECTIONS, *sc.SECTIONS_V1):
+        assert name.lower() in headings, name
+    assert "Builder: @" in ORG_TEMPLATE.read_text()
+
+
+def test_v1_caller_template_pins_v3_and_reruns_on_v1_events():
+    text = CALLER_TEMPLATE.read_text()
+    assert "reusable-sdlc-conformance.yml@sdlc-conformance-v3" in text
+    pr_types = text.split("pull_request:", 1)[1].split("\n", 2)[1]
+    for t in ("opened", "edited", "synchronize", "reopened", "ready_for_review", "converted_to_draft",
+              "labeled", "unlabeled", "review_requested"):
+        assert t in pr_types, t
+    assert "statuses: write" in text and "pull_request_target" not in text and "secrets." not in text
+    props = json.loads((CALLER_TEMPLATE.parent / "sdlc.properties.json").read_text())
+    assert props["name"] and props["description"]
+
+
+def test_v1_dependabot_template_covers_npm_pip_and_actions():
+    text = (Path(__file__).parent.parent / "templates" / "dependabot.yml").read_text()
+    for eco in ('"npm"', '"pip"', '"github-actions"'):
+        assert f"package-ecosystem: {eco}" in text, eco
