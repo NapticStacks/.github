@@ -1499,3 +1499,69 @@ def test_v1_caller_template_pins_v3_and_reruns_on_v1_events():
     assert props["name"] and props["description"]
 
     assert '# cutover: "2026-10-16T00:00:00Z"' in text  # F11: set per repo at adoption
+
+
+# --- codex round 2: every high issue signed; markers outside fences and quotes ---------------
+
+def _two_high(sign7, sign5):
+    body = v1_ctx()["pr"]["body"].replace("Closes #7\n", "Closes #7\nPart of #5\n")
+    return v1_ctx(labels=(), body=body, issues={
+        7: {"labels": ["tier:high"], "comments": [signoff()] if sign7 else []},
+        5: {"labels": ["tier:high"], "comments": [signoff()] if sign5 else []}})
+
+
+def test_r2_every_linked_high_issue_needs_its_own_signoff():
+    assert "tier" in checks(v1run(_two_high(False, True)), sc.VIOLATION)
+    assert "tier" in checks(v1run(_two_high(True, False)), sc.VIOLATION)
+    assert v1run(_two_high(True, True)) == []
+
+
+def test_r2_a_head_bound_pr_signoff_covers_every_high_issue():
+    ctx = _two_high(False, False)
+    ctx["comments"].append(signoff(sha=HEAD))
+    assert v1run(ctx) == []
+
+
+@pytest.mark.parametrize("body", [
+    "```\n{m}\n{sha}\n```",                        # fenced example
+    "> {m}\n> {sha}",                              # quoted
+    "~~~\n{m} {sha}\n~~~\nNOT signed off.",        # marker in a fence, prose outside
+    "Template: `{m}` {sha}",                       # inline, not on its own line
+])
+def test_r2_fenced_quoted_or_inline_markers_do_not_count(body):
+    text = body.format(m=sc.SECURITY_SIGNOFF_MARKER, sha=HEAD)
+    so = dict(signoff(), body=text)
+    ctx = v1_ctx(labels=("tier:high",), comments=[self_review(), so])
+    assert "tier" in checks(v1run(ctx), sc.VIOLATION)
+    rv = self_review(body=body.format(m=sc.SELF_REVIEW_MARKER, sha=HEAD))
+    assert "self-review" in checks(v1run(v1_ctx(comments=[rv])), sc.VIOLATION)
+
+
+@pytest.mark.parametrize("body", [
+    "{m} {sha}",
+    "{m}\n{sha}",
+    "Self-review below.\n{m}\nhead: {sha}\n\n```\nexample\n```",
+])
+def test_r2_accepted_marker_formats(body):
+    rv = self_review(body=body.format(m=sc.SELF_REVIEW_MARKER, sha=HEAD))
+    assert v1run(v1_ctx(comments=[rv])) == []
+    so = dict(signoff(), body=body.format(m=sc.SECURITY_SIGNOFF_MARKER, sha=HEAD))
+    assert v1run(v1_ctx(labels=("tier:high",), comments=[self_review(), so])) == []
+
+
+def test_r2_sha_must_be_on_the_marker_line_or_the_next_one():
+    rv = self_review(body=f"{sc.SELF_REVIEW_MARKER}\n\n{HEAD}")
+    assert "self-review" in checks(v1run(v1_ctx(comments=[rv])), sc.VIOLATION)
+    rv = self_review(body=f"{sc.SELF_REVIEW_MARKER}\n```\n{HEAD}\n```")
+    assert "self-review" in checks(v1run(v1_ctx(comments=[rv])), sc.VIOLATION)
+
+
+def test_r2_issue_signoff_needs_no_sha_but_must_be_outside_fences():
+    fenced = dict(signoff(), body=f"```\n{sc.SECURITY_SIGNOFF_MARKER}\n```")
+    ctx = v1_ctx(labels=("tier:high",), issues={7: {"labels": ["tier:high"], "comments": [fenced]}})
+    assert "tier" in checks(v1run(ctx), sc.VIOLATION)
+
+
+def test_r2_indented_code_block_marker_does_not_count():
+    rv = self_review(body=f"Example:\n\n    {sc.SELF_REVIEW_MARKER} {HEAD}\n")
+    assert "self-review" in checks(v1run(v1_ctx(comments=[rv])), sc.VIOLATION)

@@ -286,6 +286,29 @@ def _login(item: dict) -> str:
     return ((item.get("user") or {}).get("login") or "").lower()
 
 
+QUOTE_RE = re.compile(r"^\s*>|^(?: {4}|\t)")  # a `>` quote, or an indented code block
+
+
+def has_marker(body: str | None, marker: str, head: str | None = None) -> bool:
+    """True when a line starts with `marker` outside code fences, indented code and `>` quotes. With `head`, the
+    full head SHA must also sit on that line or on the very next one (itself outside fences and quotes).
+
+    Accepted:  `<!-- sdlc:self-review v1 --> <40-char sha>`  or the marker, then the SHA on the next line."""
+    lines = (body or "").splitlines()
+    hidden = [f or bool(QUOTE_RE.match(l)) for l, f in zip(lines, fence_mask(lines))]
+    for i, line in enumerate(lines):
+        if hidden[i] or not line.strip().startswith(marker):
+            continue
+        if head is None:
+            return True
+        near = [line.strip()[len(marker):]]
+        if i + 1 < len(lines) and not hidden[i + 1]:
+            near.append(lines[i + 1])
+        if any(head in SHA_RE.findall(t) for t in near):
+            return True
+    return False
+
+
 def trusted_marker(item: dict) -> bool:
     """A marker comment or review counts only when gather proved nobody but its author edited it.
     No edit info (`edited_by_other` absent) means unproven, so it doesn't count."""
@@ -491,13 +514,13 @@ def check_tier(repo, pr, ctx, opts, builder) -> list[Finding]:
     head = pr["head"]["sha"]
 
     def signs(c, need_sha):
-        return (_login(c) in allowed and SECURITY_SIGNOFF_MARKER in (c.get("body") or "") and trusted_marker(c)
-                and (not need_sha or head in SHA_RE.findall(c.get("body") or "")))
-    # A sign-off counts on the PR (naming the head SHA) or on a linked issue that itself carries tier:high.
-    # A sign-off on some other linked issue was given for other work and is never borrowed.
+        return (_login(c) in allowed and trusted_marker(c)
+                and has_marker(c.get("body"), SECURITY_SIGNOFF_MARKER, head if need_sha else None))
+    # A head-SHA-bound sign-off on the PR covers it all. Otherwise EVERY linked tier:high issue needs its own
+    # sign-off: linking an unrelated, already-signed issue never borrows its sign-off.
     high_issues = [i for i in issues.values() if effective_tier(i.get("labels")) == "high"]
-    if any(signs(c, True) for c in ctx.get("comments") or []) or any(
-            signs(c, False) for i in high_issues for c in i.get("comments") or []):
+    if any(signs(c, True) for c in ctx.get("comments") or []) or (
+            high_issues and all(any(signs(c, False) for c in i.get("comments") or []) for i in high_issues)):
         return []
     who = ", ".join(sorted(allowed)) or "nobody (every signer built or authored this PR)"
     return [Finding("tier", VIOLATION, "tier:high without a security sign-off.",
@@ -545,14 +568,14 @@ def check_self_review(repo, pr, ctx, builder, kind) -> list[Finding]:
         return [Finding("self-review", level, "No self-review: there is no builder of record.",
                         "The marker counts only from the builder of record. Fix builder-of-record first.", fix)]
     b = builder.lower()
-    marks = [c for c in ctx.get("comments") or [] if SELF_REVIEW_MARKER in (c.get("body") or "")]
-    marks += [r for r in ctx.get("reviews") or [] if SELF_REVIEW_MARKER in (r.get("body") or "")
+    marks = [c for c in ctx.get("comments") or [] if has_marker(c.get("body"), SELF_REVIEW_MARKER)]
+    marks += [r for r in ctx.get("reviews") or [] if has_marker(r.get("body"), SELF_REVIEW_MARKER)
               and r.get("state") != "DISMISSED"]
     marks = [m for m in marks if trusted_marker(m)]  # an edit by anyone but the author voids it
     mine = [m for m in marks if _login(m) == b]
     # A comment names the head SHA in full; a review is bound to its commit_id by GitHub.
     on_head = [m for m in mine
-               if m.get("commit_id") == head or ("commit_id" not in m and head in SHA_RE.findall(m.get("body") or ""))]
+               if m.get("commit_id") == head or ("commit_id" not in m and has_marker(m.get("body"), SELF_REVIEW_MARKER, head))]
     if on_head:
         return []
     if mine:

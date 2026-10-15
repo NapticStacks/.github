@@ -177,8 +177,8 @@ All of it skips PRs created before `cutover` (default `2026-10-16T00:00:00Z`). T
   - Only cross-repo issues linked and no `tier:*` on the PR: a violation. Add the label to the PR.
   - `tier:high` needs a comment carrying `<!-- sdlc:security-signoff v1 -->` from the first `security_signers`
     login (or a later one when the first one built it). It counts on a linked issue that itself carries
-    `tier:high`, or on the PR when the comment also names the full head SHA. A sign-off on another linked issue
-    is never borrowed.
+    `tier:high`, or on the PR when the comment also names the full head SHA. Every linked `tier:high` issue
+    needs its own; a sign-off is never borrowed from another issue.
   - Neither the `Builder:` login nor the PR author can sign off. No `security_signers` set means high always fails.
 - **`builder-of-record`:** a `Builder: @login` line in the body (comments and code fences don't count). The login
   must be a real GitHub user account, not a bot, and on `builders`. With no `builders` set, that last part is a note.
@@ -186,6 +186,16 @@ All of it skips PRs created before `cutover` (default `2026-10-16T00:00:00Z`). T
 - **`self-review`:** a comment by the builder with `<!-- sdlc:self-review v1 -->` and the full 40-character head
   SHA, or a review by the builder carrying the marker on the head commit. A push makes it stale. `/closer` posts
   the marker and requests a reviewer (through `/sdlc-handoff`, being added in napticstack-skills 0.88.0).
+- **Marker format.** The marker starts its own line, outside code fences, indented code and `>` quotes. For the
+  self-review comment and a PR-level sign-off, the full 40-character head SHA sits on the marker line or the very
+  next line:
+
+  ```
+  <!-- sdlc:self-review v1 --> 3f2a9c1e7b4d5a6f8e9d0c1b2a3f4e5d6c7b8a90
+  ```
+
+  A sign-off on a `tier:high` issue needs only `<!-- sdlc:security-signoff v1 -->` on its own line. Every linked
+  `tier:high` issue needs its own sign-off, unless the PR carries a head-SHA sign-off.
 - **Edited markers don't count.** A marker comment or review counts only if nobody but its author ever edited it.
   The gate reads each marker's edit history over GraphQL (`userContentEdits`, `editor`). If that read fails, the
   gate exits 2. It never trusts an unchecked marker.
