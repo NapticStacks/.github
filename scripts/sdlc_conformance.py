@@ -264,12 +264,10 @@ def prose(body: str | None) -> str:
 
 
 def builder_logins(body: str | None) -> list[str]:
-    """Distinct logins (lowercased, in order) on `Builder:` lines outside comments, fences and quotes.
-    When the body has a `## Builder` section, only lines under it count. Placeholders are skipped."""
-    found = sections(body)
-    text = found["builder"] if "builder" in found else body
+    """Distinct logins (lowercased, in order) on every `Builder:` line outside comments, fences and quotes,
+    in every `## Builder` section and anywhere else. Placeholders are skipped. More than one is ambiguous."""
     out = []
-    for m in BUILDER_RE.finditer(prose(text)):
+    for m in BUILDER_RE.finditer(prose(body)):
         login = m.group(1).lower()
         if login not in BUILDER_PLACEHOLDERS and login not in out:
             out.append(login)
@@ -280,19 +278,6 @@ def builder_of_record(body: str | None) -> str | None:
     """The one builder login, or None when there is none or more than one."""
     logins = builder_logins(body)
     return logins[0] if len(logins) == 1 else None
-
-
-def closing_refs(body: str | None, repo: str) -> set[int]:
-    """Same-repo issue numbers the body closes (Closes/Fixes/Resolves; never `Part of`)."""
-    owner, name = repo.lower().split("/")
-    out = set()
-    for m in REF_RE.finditer(prose(body)):
-        if m.group("kw").lower().startswith("part"):
-            continue
-        o, r = (m.group("uo"), m.group("ur")) if m.group("un") else (m.group("o"), m.group("r"))
-        if not o or (o.lower(), r.lower()) == (owner, name):
-            out.add(int(m.group("un") or m.group("n")))
-    return out
 
 
 def label_names(labels) -> list[str]:
@@ -310,64 +295,23 @@ def _login(item: dict) -> str:
     return ((item.get("user") or {}).get("login") or "").lower()
 
 
-QUOTE_RE = re.compile(r"^\s*>|^(?: {4}|\t)")  # a `>` quote, or an indented code block
 HANDOFF_MARKER = "<!-- sdlc:handoff v1"
-MARKERS = (SELF_REVIEW_MARKER, SECURITY_SIGNOFF_MARKER)
-ANY_COMMENT_RE = re.compile(r"<!--.*?(?:-->|\Z)", re.S)
-# A fence opener even inside list items or quotes: `- ```py`, `1. ~~~`, `> ```.
-MARKER_FENCE_RE = re.compile(r"^[ \t>]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)*(`{3,}|~{3,})(.*)$")
-HTML_TAG_RE = re.compile(r"<(/?)([A-Za-z][A-Za-z0-9-]*)(?=[\s/>])[^>]*?(/?)>")
-VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
-             "source", "track", "wbr"}
+SHA40 = r"([0-9a-f]{40})"
+SELF_REVIEW_LINE_RE = re.compile(r"^" + re.escape(SELF_REVIEW_MARKER) + r"(?: " + SHA40 + r")?$")
+SIGNOFF_LINE_RE = re.compile(r"^" + re.escape(SECURITY_SIGNOFF_MARKER) + r"(?: " + SHA40 + r")?$")
 
 
-def _marker_mask(lines: list[str]) -> list[bool]:
-    """True for each line inside a fence (list- and quote-nested too), an open HTML element,
-    a `>` quote or an indented code block. Fails closed: an unclosed fence or tag masks the rest."""
-    out, fence, depth = [], None, 0
-    for line in lines:
-        m = MARKER_FENCE_RE.match(line)
-        if fence is not None:
-            out.append(True)
-            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not m.group(2).strip():
-                fence = None
-            continue
-        if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
-            fence = m.group(1)
-            out.append(True)
-            continue
-        out.append(depth > 0 or bool(QUOTE_RE.match(line)))
-        for close, tag, selfclose in HTML_TAG_RE.findall(line):
-            if tag.lower() in VOID_TAGS or selfclose:
-                continue
-            depth = max(depth - 1, 0) if close else depth + 1
-    return out
-
-
-def has_marker(body: str | None, marker: str, head: str | None = None) -> bool:
-    """True when a line starts at column 0 with `marker`, outside code fences (list-nested too), indented
-    code, `>` quotes and any open HTML element. Every other HTML comment is blanked first, and a comment
-    holding the handoff marker never counts. With `head`, the full head SHA must also sit on the marker line
-    or on the very next one (itself unmasked).
-
-    Accepted:  `<!-- sdlc:self-review v1 --> <40-char sha>`  or the marker, then the SHA on the next line."""
+def first_line_marker(body: str | None, line_re: re.Pattern) -> tuple[bool, str | None]:
+    """(matched, sha) for a marker on the body's FIRST non-empty line, exactly: the marker at column 0,
+    then optionally one space and a full lowercase 40-hex SHA, then nothing (trailing whitespace and CR are
+    stripped). Everything after that line is ignored, so fences, quotes and HTML never matter. A body that
+    also carries the handoff packet is never a marker."""
     text = body or ""
     if HANDOFF_MARKER in text:
-        return False
-    text = ANY_COMMENT_RE.sub(lambda m: m.group(0) if m.group(0) in MARKERS else "\n" * m.group(0).count("\n"), text)
-    lines = text.splitlines()
-    hidden = _marker_mask(lines)
-    for i, line in enumerate(lines):
-        if hidden[i] or not line.startswith(marker):
-            continue
-        if head is None:
-            return True
-        near = [line[len(marker):]]
-        if i + 1 < len(lines) and not hidden[i + 1]:
-            near.append(lines[i + 1])
-        if any(head in SHA_RE.findall(t) for t in near):
-            return True
-    return False
+        return False, None
+    first = next((l.rstrip() for l in text.splitlines() if l.strip()), "")
+    m = line_re.match(first)
+    return (True, m.group(1)) if m else (False, None)
 
 
 def trusted_marker(item: dict) -> bool:
@@ -573,15 +517,16 @@ def check_tier(repo, pr, ctx, opts, builders) -> list[Finding]:
     allowed -= excluded
     head = pr["head"]["sha"]
 
-    def signs(c, need_sha):
-        return (_login(c) in allowed and trusted_marker(c)
-                and has_marker(c.get("body"), SECURITY_SIGNOFF_MARKER, head if need_sha else None))
+    def signs(c, on_pr):
+        ok, sha = first_line_marker(c.get("body"), SIGNOFF_LINE_RE)
+        return (ok and _login(c) in allowed and trusted_marker(c)
+                and (sha == head if on_pr else True))
     # A head-SHA-bound sign-off on the PR covers it all. Otherwise the high tier must come only from issues
     # this PR closes, and EVERY closed tier:high issue needs its own sign-off. A `Part of` or mention-linked
     # issue can raise the tier but never satisfy it: that sign-off was given for other work.
     if any(signs(c, True) for c in ctx.get("comments") or []):
         return []
-    closing = closing_refs(pr.get("body"), repo) | set(ctx.get("closing_issues") or [])
+    closing = set(ctx.get("closing_issues") or [])  # GitHub's own parse: keywords plus sidebar links
     high = {k for k, i in issues.items() if effective_tier(i.get("labels")) == "high"}
     if high and high <= closing and all(any(signs(c, False) for c in issues[k].get("comments") or []) for k in high):
         return []
@@ -637,14 +582,22 @@ def check_self_review(repo, pr, ctx, builder, kind) -> list[Finding]:
         return [Finding("self-review", level, "No self-review: there is no builder of record.",
                         "The marker counts only from the builder of record. Fix builder-of-record first.", fix)]
     b = builder.lower()
-    marks = [c for c in ctx.get("comments") or [] if has_marker(c.get("body"), SELF_REVIEW_MARKER)]
-    marks += [r for r in ctx.get("reviews") or [] if has_marker(r.get("body"), SELF_REVIEW_MARKER)
-              and r.get("state") != "DISMISSED"]
-    marks = [m for m in marks if trusted_marker(m)]  # an edit by anyone but the author voids it
+    # A comment: the first line is the marker plus a full SHA. A review: the first line is the marker (a SHA,
+    # if given, must be the head) and GitHub binds it to commit_id.
+    marks, on_head = [], []
+    for c in ctx.get("comments") or []:
+        ok, sha = first_line_marker(c.get("body"), SELF_REVIEW_LINE_RE)
+        if ok and sha and trusted_marker(c):
+            marks.append(c)
+            if sha == head and _login(c) == b:
+                on_head.append(c)
+    for r in ctx.get("reviews") or []:
+        ok, sha = first_line_marker(r.get("body"), SELF_REVIEW_LINE_RE)
+        if ok and r.get("state") != "DISMISSED" and trusted_marker(r):
+            marks.append(r)
+            if r.get("commit_id") == head and sha in (None, head) and _login(r) == b:
+                on_head.append(r)
     mine = [m for m in marks if _login(m) == b]
-    # A comment names the head SHA in full; a review is bound to its commit_id by GitHub.
-    on_head = [m for m in mine
-               if m.get("commit_id") == head or ("commit_id" not in m and has_marker(m.get("body"), SELF_REVIEW_MARKER, head))]
     if on_head:
         return []
     if mine:
@@ -654,8 +607,8 @@ def check_self_review(repo, pr, ctx, builder, kind) -> list[Finding]:
         return [Finding("self-review", level, f"The self-review marker isn't from the builder `{builder}`.",
                         "Only the builder of record's own marker counts.", fix)]
     return [Finding("self-review", level, "No self-review marker on this PR.",
-                    f"The builder posts `{SELF_REVIEW_MARKER}` with the head SHA after /naptic-review "
-                    "(and /cso for medium and high). /closer does it through /sdlc-handoff, "
+                    f"After /naptic-review (and /cso for medium and high) the builder posts a comment whose first "
+                    f"line is exactly `{SELF_REVIEW_MARKER} <full 40-char head sha>`. /closer does it through /sdlc-handoff, "
                     "which is being added in napticstack-skills 0.88.0.", fix)]
 
 

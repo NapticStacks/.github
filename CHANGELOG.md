@@ -11,10 +11,10 @@
   template carries them.
 - New inputs `builders`, `security_signers`, `cutover` (and CLI flags). `gate_ref` defaults to `sdlc-conformance-v3`.
 - Org caller template `workflow-templates/sdlc.yml` (adds the `review_requested` trigger).
-- Marker comments and reviews edited by anyone but their author never count (GraphQL edit history; exit 2 if
-  unreadable). A sign-off counts only on the PR (naming the head SHA) or on a linked `tier:high` issue, and every
-  closed `tier:high` issue needs its own (`Part of` issues raise the tier but never satisfy it). Markers must start
-  a line at column 0 outside fences, indented code, quotes and open HTML elements. One `Builder:` login only.
+- Markers count only as the comment's exact first non-empty line (`<!-- sdlc:self-review v1 --> <head sha>`;
+  sign-offs alike), from the right login, never edited by anyone else (GraphQL edit history; exit 2 if unreadable).
+- `tier:high` sign-off: on the PR with the head SHA, or on every `tier:high` issue the PR closes per GitHub's
+  `closingIssuesReferences`. `Part of` issues raise the tier but never satisfy it. One `Builder:` login only.
 - Pre-cutover PRs get exactly the v2 checks. v1 and v2 tags don't move.
 
 ## sdlc-conformance-v2 (2026-10-13)

@@ -175,31 +175,30 @@ All of it skips PRs created before `cutover` (default `2026-10-16T00:00:00Z`). T
 - **`tier`:** the highest `tier:*` label on the PR or its same-repo linked issues. None is a note (counts as medium).
   - A linked issue that can't be read (404) means tier unknown: a violation, never a silent medium.
   - Only cross-repo issues linked and no `tier:*` on the PR: a violation. Add the label to the PR.
-  - `tier:high` needs a comment carrying `<!-- sdlc:security-signoff v1 -->` from the first `security_signers`
-    login (or a later one when the first one built it). It counts on a linked issue that itself carries
-    `tier:high` **and that this PR closes** (Closes/Fixes/Resolves, or GitHub's sidebar link), or on the PR when the
-    comment also names the full head SHA. Every closed `tier:high` issue needs its own. A `Part of` or mentioned
-    issue can raise the tier but never satisfy it: then only the PR sign-off with the head SHA works.
-  - Neither the `Builder:` login nor the PR author can sign off. No `security_signers` set means high always fails.
-- **`builder-of-record`:** a `Builder: @login` line in the body (comments, code fences and `>` quotes don't count).
-  When the body has a `## Builder` section, only lines under it count. More than one distinct login fails. The login
-  must be a real GitHub user account, not a bot, and on `builders`. With no `builders` set, that last part is a note.
-  Bot and swarm PRs need the line too. Dependabot gets a note.
-- **`self-review`:** a comment by the builder with `<!-- sdlc:self-review v1 -->` and the full 40-character head
-  SHA, or a review by the builder carrying the marker on the head commit. A push makes it stale. `/closer` posts
-  the marker and requests a reviewer (through `/sdlc-handoff`, being added in napticstack-skills 0.88.0).
-- **Marker format.** The marker starts a line at column 0, outside code fences (list-nested too), indented code,
-  `>` quotes and any open HTML element (`<details>`, `<pre>`, `<blockquote>`...). Other HTML comments are ignored,
-  and a comment that carries the handoff marker (`<!-- sdlc:handoff v1`) never counts as a marker comment. For the
-  self-review comment and a PR-level sign-off, the full 40-character head SHA sits on the marker line or the very
-  next line:
+  - `tier:high` needs a security sign-off from the first `security_signers` login (or a later one when the first
+    one built it). Neither a `Builder:` login nor the PR author can sign.
+  - **Where it counts:** on the PR with the head SHA (covers everything), or on each `tier:high` issue the PR
+    closes. "Closes" means GitHub's own `closingIssuesReferences` (its parse of the body plus sidebar links), read
+    over GraphQL; the gate never parses Closes/Fixes itself. A `Part of` or mentioned issue can raise the tier but
+    never satisfy it: then only the PR sign-off works. No `security_signers` set means high always fails.
+- **`builder-of-record`:** every `Builder: @login` line in the body counts: in every `## Builder` section and
+  anywhere else (HTML comments, code fences and `>` quotes don't). Exactly one distinct login is allowed. It must be
+  a real GitHub user account, not a bot, and on `builders`. With no `builders` set, that last part is a note. Bot and
+  swarm PRs need the line too. Dependabot gets a note.
+- **`self-review`:** the builder posts a PR comment whose **first non-empty line** is exactly the marker, one
+  space and the full 40-character lowercase head SHA. `/closer` posts it and requests a reviewer (through
+  `/sdlc-handoff`, being added in napticstack-skills 0.88.0). A push makes it stale. A PR review by the builder on
+  the head commit may instead start with the marker alone (GitHub binds the review to its commit).
+- **Accepted marker lines** (column 0, trailing spaces ignored, everything after the first line ignored):
 
-  ```
-  <!-- sdlc:self-review v1 --> 3f2a9c1e7b4d5a6f8e9d0c1b2a3f4e5d6c7b8a90
-  ```
+  | Where | First non-empty line, exactly |
+  |---|---|
+  | Self-review comment on the PR | `<!-- sdlc:self-review v1 --> <head sha>` |
+  | Self-review PR review | `<!-- sdlc:self-review v1 -->`, optionally followed by ` <head sha>` |
+  | Security sign-off on the PR | `<!-- sdlc:security-signoff v1 --> <head sha>` |
+  | Security sign-off on a closed `tier:high` issue | `<!-- sdlc:security-signoff v1 -->`, optionally followed by ` <sha>` |
 
-  A sign-off on a `tier:high` issue needs only `<!-- sdlc:security-signoff v1 -->` on its own line. Every linked
-  `tier:high` issue needs its own sign-off, unless the PR carries a head-SHA sign-off.
+  A comment that also contains the handoff packet (`<!-- sdlc:handoff v1`) never counts.
 - **Edited markers don't count.** A marker comment or review counts only if nobody but its author ever edited it.
   The gate reads each marker's edit history over GraphQL (`userContentEdits`, `editor`). If that read fails, the
   gate exits 2. It never trusts an unchecked marker.

@@ -917,13 +917,13 @@ V1_SECTIONS = ("\n## Builder\nBuilder: @example-dev\n\n## Workstation\nexample-b
 
 
 def self_review(login=BUILDER, sha=HEAD, body=None, at="2026-10-20T10:00:00Z", edited_by_other=False):
-    text = body if body is not None else f"{sc.SELF_REVIEW_MARKER}\nSelf-review done on head {sha}.\n"
+    text = body if body is not None else f"{sc.SELF_REVIEW_MARKER} {sha}"  # what /closer posts
     return {"user": {"login": login}, "body": text, "created_at": at, "node_id": f"IC_{login}_{at}",
             "edited_by_other": edited_by_other}
 
 
 def signoff(login=SIGNER, at="2026-10-19T10:00:00Z", sha=None, edited_by_other=False):
-    text = f"{sc.SECURITY_SIGNOFF_MARKER}\nSigned off." + (f" Head {sha}." if sha else "")
+    text = f"{sc.SECURITY_SIGNOFF_MARKER}" + (f" {sha}" if sha else "") + "\nSigned off after reading the plan."
     return {"user": {"login": login}, "body": text, "created_at": at, "node_id": f"IC_so_{login}_{at}",
             "edited_by_other": edited_by_other}
 
@@ -931,7 +931,7 @@ def signoff(login=SIGNER, at="2026-10-19T10:00:00Z", sha=None, edited_by_other=F
 HIGH_SIGNED = {7: {"labels": ["tier:high"], "comments": []}}
 
 
-def v1_ctx(labels=("tier:low",), comments=None, issues=None, builder_account="User", **pr_overrides):
+def v1_ctx(labels=("tier:low",), comments=None, issues=None, builder_account="User", closing=(7,), **pr_overrides):
     """A post-cutover PR that passes every v1 check."""
     ctx = make_ctx(**pr_overrides)
     pr = ctx["pr"]
@@ -943,6 +943,7 @@ def v1_ctx(labels=("tier:low",), comments=None, issues=None, builder_account="Us
         pr["labels"] = [{"name": l} for l in labels]
     ctx["comments"] = [self_review()] if comments is None else comments
     ctx["linked_issues"] = {7: {"labels": [], "comments": []}} if issues is None else issues
+    ctx["closing_issues"] = list(closing)  # GitHub's closingIssuesReferences
     m = sc.BUILDER_RE.search(sc.COMMENT_RE.sub("", pr["body"]))
     if m and builder_account is not None:
         ctx["builder_account"] = {"login": m.group(1), "type": builder_account}
@@ -1269,7 +1270,7 @@ def test_v1_newest_marker_on_head_counts_even_after_a_stale_one():
 def test_v1_marker_in_a_review_on_head_counts():
     ctx = v1_ctx(comments=[])
     ctx["reviews"].append({"user": {"login": BUILDER}, "state": "COMMENTED", "commit_id": HEAD,
-                           "submitted_at": "2026-10-20T10:00:00Z", "body": f"## Three-lens review\n{sc.SELF_REVIEW_MARKER}",
+                           "submitted_at": "2026-10-20T10:00:00Z", "body": f"{sc.SELF_REVIEW_MARKER}\n## Three-lens review",
                            "edited_by_other": False})
     assert v1run(ctx) == []
 
@@ -1505,16 +1506,16 @@ def test_v1_caller_template_pins_v3_and_reruns_on_v1_events():
     assert '# cutover: "2026-10-16T00:00:00Z"' in text  # F11: set per repo at adoption
 
 
-# --- codex round 2: every high issue signed; markers outside fences and quotes ---------------
+# --- codex rounds 2-4: closing issues come only from GitHub; one exact first-line marker -------
 
-def _two_high(sign7, sign5):
+def _two_high(sign7, sign5, closing=(7, 5)):
     body = v1_ctx()["pr"]["body"].replace("Closes #7\n", "Closes #7\nCloses #5\n")
-    return v1_ctx(labels=(), body=body, issues={
+    return v1_ctx(labels=(), body=body, closing=closing, issues={
         7: {"labels": ["tier:high"], "comments": [signoff()] if sign7 else []},
         5: {"labels": ["tier:high"], "comments": [signoff()] if sign5 else []}})
 
 
-def test_r2_every_linked_high_issue_needs_its_own_signoff():
+def test_r2_every_closed_high_issue_needs_its_own_signoff():
     assert "tier" in checks(v1run(_two_high(False, True)), sc.VIOLATION)
     assert "tier" in checks(v1run(_two_high(True, False)), sc.VIOLATION)
     assert v1run(_two_high(True, True)) == []
@@ -1526,81 +1527,33 @@ def test_r2_a_head_bound_pr_signoff_covers_every_high_issue():
     assert v1run(ctx) == []
 
 
-@pytest.mark.parametrize("body", [
-    "```\n{m}\n{sha}\n```",                        # fenced example
-    "> {m}\n> {sha}",                              # quoted
-    "~~~\n{m} {sha}\n~~~\nNOT signed off.",        # marker in a fence, prose outside
-    "Template: `{m}` {sha}",                       # inline, not on its own line
-])
-def test_r2_fenced_quoted_or_inline_markers_do_not_count(body):
-    text = body.format(m=sc.SECURITY_SIGNOFF_MARKER, sha=HEAD)
-    so = dict(signoff(), body=text)
-    ctx = v1_ctx(labels=("tier:high",), comments=[self_review(), so])
-    assert "tier" in checks(v1run(ctx), sc.VIOLATION)
-    rv = self_review(body=body.format(m=sc.SELF_REVIEW_MARKER, sha=HEAD))
-    assert "self-review" in checks(v1run(v1_ctx(comments=[rv])), sc.VIOLATION)
-
-
-@pytest.mark.parametrize("body", [
-    "{m} {sha}",
-    "{m}\n{sha}",
-    "Self-review below.\n{m}\nhead: {sha}\n\n```\nexample\n```",
-])
-def test_r2_accepted_marker_formats(body):
-    rv = self_review(body=body.format(m=sc.SELF_REVIEW_MARKER, sha=HEAD))
-    assert v1run(v1_ctx(comments=[rv])) == []
-    so = dict(signoff(), body=body.format(m=sc.SECURITY_SIGNOFF_MARKER, sha=HEAD))
-    assert v1run(v1_ctx(labels=("tier:high",), comments=[self_review(), so])) == []
-
-
-def test_r2_sha_must_be_on_the_marker_line_or_the_next_one():
-    rv = self_review(body=f"{sc.SELF_REVIEW_MARKER}\n\n{HEAD}")
-    assert "self-review" in checks(v1run(v1_ctx(comments=[rv])), sc.VIOLATION)
-    rv = self_review(body=f"{sc.SELF_REVIEW_MARKER}\n```\n{HEAD}\n```")
-    assert "self-review" in checks(v1run(v1_ctx(comments=[rv])), sc.VIOLATION)
-
-
-def test_r2_issue_signoff_needs_no_sha_but_must_be_outside_fences():
-    fenced = dict(signoff(), body=f"```\n{sc.SECURITY_SIGNOFF_MARKER}\n```")
-    ctx = v1_ctx(labels=("tier:high",), issues={7: {"labels": ["tier:high"], "comments": [fenced]}})
-    assert "tier" in checks(v1run(ctx), sc.VIOLATION)
-
-
-def test_r2_indented_code_block_marker_does_not_count():
-    rv = self_review(body=f"Example:\n\n    {sc.SELF_REVIEW_MARKER} {HEAD}\n")
-    assert "self-review" in checks(v1run(v1_ctx(comments=[rv])), sc.VIOLATION)
-
-
-# --- codex round 3: closing refs only; HTML-masked markers; Builder section -----------------
-
 def test_r3_part_of_issue_raises_tier_but_cannot_satisfy_signoff():
     body = v1_ctx()["pr"]["body"].replace("Closes #7\n", "Closes #7\nPart of #5\n")
-    ctx = v1_ctx(labels=(), body=body, issues={7: {"labels": [], "comments": []},
-                                               5: {"labels": ["tier:high"], "comments": [signoff()]}})
-    [f] = [f for f in v1run(ctx) if f.check == "tier"]
-    assert f.level == sc.VIOLATION
+    ctx = v1_ctx(labels=(), body=body, closing=(7,), issues={7: {"labels": [], "comments": []},
+                                                             5: {"labels": ["tier:high"], "comments": [signoff()]}})
+    assert "tier" in checks(v1run(ctx), sc.VIOLATION)
     ctx["comments"].append(signoff(sha=HEAD))  # only a head-bound PR sign-off satisfies it
     assert v1run(ctx) == []
 
 
-def test_r3_closing_issue_signed_and_part_of_issue_high_still_fails():
-    body = v1_ctx()["pr"]["body"].replace("Closes #7\n", "Closes #7\nPart of #5\n")
-    ctx = v1_ctx(labels=(), body=body, issues={7: {"labels": ["tier:high"], "comments": [signoff()]},
-                                               5: {"labels": ["tier:high"], "comments": [signoff()]}})
+def test_r3_closed_issue_signed_and_part_of_issue_high_still_fails():
+    ctx = _two_high(True, True, closing=(7,))
     assert "tier" in checks(v1run(ctx), sc.VIOLATION)
 
 
-def test_r3_github_closing_reference_counts_as_closing():
+def test_r4_closing_issues_come_only_from_github_not_the_body_text():
+    """Round 4 P1: an indented or quoted `Closes #7` that GitHub doesn't treat as closing never counts."""
+    for body_ref in ("> Closes #7\n", "    Closes #7\n", "Closes #7\n"):
+        body = v1_ctx()["pr"]["body"].replace("Closes #7\n", body_ref)
+        ctx = v1_ctx(labels=(), body=body, closing=(), issues={7: {"labels": ["tier:high"], "comments": [signoff()]}})
+        assert "tier" in checks(v1run(ctx), sc.VIOLATION), body_ref
+    assert not hasattr(sc, "closing_refs")
+
+
+def test_r4_sidebar_linked_issue_counts_as_closing():
     body = v1_ctx()["pr"]["body"].replace("Closes #7\n", "Part of #7\n")
-    ctx = v1_ctx(labels=(), body=body, issues={7: {"labels": ["tier:high"], "comments": [signoff()]}})
-    assert "tier" in checks(v1run(ctx), sc.VIOLATION)
-    ctx["closing_issues"] = [7]  # linked in the sidebar: GitHub's closingIssuesReferences
+    ctx = v1_ctx(labels=(), body=body, closing=(7,), issues={7: {"labels": ["tier:high"], "comments": [signoff()]}})
     assert v1run(ctx) == []
-
-
-def test_r3_closing_refs_parse():
-    body = "Closes #7\nPart of #5\nfixes NapticStacks/example#9\nResolves https://github.com/NapticStacks/example/issues/11"
-    assert sc.closing_refs(body, REPO) == {7, 9, 11}
 
 
 def test_r3_gather_reads_closing_issue_references():
@@ -1616,35 +1569,93 @@ def test_r3_closing_references_read_failure_is_a_checker_error():
         sc.gather(sc.Api("t0ken", transport), REPO, 42)
 
 
-M, S = sc.SELF_REVIEW_MARKER, HEAD
+M, SO, S = sc.SELF_REVIEW_MARKER, sc.SECURITY_SIGNOFF_MARKER, HEAD
 
 
-@pytest.mark.parametrize("body", [
-    f"<blockquote>\n{M} {S}\n</blockquote>",
-    f"<pre>\n{M} {S}\n</pre>",
-    f"<details><summary>example</summary>\n\n{M} {S}\n\n</details>",
-    f"<code>\n{M} {S}\n</code>",
-    f"<div>\n{M} {S}",                                                   # never closed: masked to the end
-    f"<!-- sdlc:handoff v1 -->\n{M} {S}\n",                               # a handoff comment is never a marker
-    f"<!-- sdlc:handoff v1 {{\"note\": \"\n{M} {S}\n\"}} -->",            # marker text inside another comment
-    f"- example:\n  ```\n{M} {S}\n  ```",                                # list-nested fence
-    f"1. example:\n   ~~~\n{M} {S}\n   ~~~",
-    f" {M} {S}",                                                          # not at column 0
-])
-def test_r3_masked_markers_do_not_count(body):
-    assert sc.has_marker(body, M, HEAD) is False
-    assert "self-review" in checks(v1run(v1_ctx(comments=[self_review(body=body)])), sc.VIOLATION)
+def test_r4_closer_one_line_comment_passes():
+    """WS-2a's /closer posts exactly this one-line comment."""
+    body = f"<!-- sdlc:self-review v1 --> {HEAD}"
+    assert v1run(v1_ctx(comments=[self_review(body=body)])) == []
 
 
 @pytest.mark.parametrize("body", [
     f"{M} {S}",
-    f"Self-review done. <code>ok</code>\n{M}\n{S}",
-    f"<details><summary>notes</summary>\nx\n</details>\n\n{M} {S}",
-    f"See <https://example.com/x>.\n{M} {S}",
-    f"line<br>\n{M} {S}",
+    f"{M} {S}   \r\n",                         # trailing whitespace / CR stripped
+    f"\n\n{M} {S}\nanything after is ignored: ```\n<details>",
+    f"{M} {S}\nuse `<form>` here",             # round 4: inline HTML later never masks it
 ])
-def test_r3_markers_after_closed_html_still_count(body):
-    assert sc.has_marker(body, M, HEAD) is True
+def test_r4_accepted_self_review_forms(body):
+    assert v1run(v1_ctx(comments=[self_review(body=body)])) == []
+
+
+@pytest.mark.parametrize("body", [
+    f"{M}\n{S}",                                # SHA on the next line: dropped
+    f" {M} {S}",                                # not column 0
+    f"{M}  {S}",                                # two spaces
+    f"{M} {S} done",                            # trailing text
+    f"{M} {S[:7]}",                             # short SHA
+    f"{M} {S.upper()}",                         # uppercase hex
+    f"Self-review:\n{M} {S}",                   # not the first non-empty line
+    f"```\n{M} {S}\n```",                       # fenced
+    f"> {M} {S}",                               # quoted
+    f"<details>\n{M} {S}\n</details>",          # HTML block
+    f"<div\nclass=\"x\">\n{M} {S}",             # round 4: multi-line HTML opener
+    f"- x\n  ```\n{M} {S}\n  ```",              # list-nested fence
+    f"`{M} {S}`",                               # inline code
+    f"<!-- sdlc:handoff v1 --> {M} {S}",        # handoff packet
+    f"{M} {S}\n<!-- sdlc:handoff v1 {{}} -->",  # handoff packet carrying a marker line
+    f"{M}",                                     # comment marker without a SHA
+])
+def test_r4_rejected_self_review_forms(body):
+    assert "self-review" in checks(v1run(v1_ctx(comments=[self_review(body=body)])), sc.VIOLATION)
+
+
+def test_r4_self_review_on_an_older_sha_is_stale():
+    [f] = [f for f in v1run(v1_ctx(comments=[self_review(body=f"{M} {'c' * 40}")])) if f.check == "self-review"]
+    assert "older" in f.problem
+
+
+@pytest.mark.parametrize("body,ok", [
+    (f"{SO} {S}", True),
+    (f"{SO}\n{S}", False),
+    (f"{SO}", False),                           # a PR-level sign-off needs the SHA
+    (f"Signed.\n{SO} {S}", False),
+    (f"{SO} {'c' * 40}", False),
+])
+def test_r4_pr_level_signoff_format(body, ok):
+    ctx = v1_ctx(labels=("tier:high",), closing=(), comments=[self_review(), dict(signoff(), body=body)])
+    assert ("tier" in checks(v1run(ctx), sc.VIOLATION)) is (not ok)
+
+
+@pytest.mark.parametrize("body,ok", [
+    (f"{SO}", True),
+    (f"{SO}\nRead the plan; fine.", True),
+    (f"{SO} {S}", True),                        # SHA optional on an issue
+    (f"{SO} {S[:7]}", False),
+    (f"```\n{SO}\n```", False),
+    (f"Looks fine.\n{SO}", False),
+    (f"> {SO}", False),
+])
+def test_r4_issue_level_signoff_format(body, ok):
+    ctx = v1_ctx(labels=(), issues={7: {"labels": ["tier:high"], "comments": [dict(signoff(), body=body)]}})
+    assert ("tier" in checks(v1run(ctx), sc.VIOLATION)) is (not ok)
+
+
+def _review(body, sha=HEAD):
+    return {"user": {"login": BUILDER}, "state": "COMMENTED", "commit_id": sha,
+            "submitted_at": "2026-10-20T10:00:00Z", "body": body, "edited_by_other": False}
+
+
+@pytest.mark.parametrize("body,ok", [
+    (f"{M}\n## Three-lens review", True),
+    (f"{M} {S}\n## Three-lens review", True),
+    (f"## Three-lens review\n{M}", False),
+    (f"{M} {'c' * 40}", False),                 # a SHA, if given, must be the head
+])
+def test_r4_review_marker_first_line(body, ok):
+    ctx = v1_ctx(comments=[])
+    ctx["reviews"].append(_review(body))
+    assert ("self-review" in checks(v1run(ctx), sc.VIOLATION)) is (not ok)
 
 
 @pytest.mark.parametrize("line", ["> Builder: @example-dev", ">Builder: @example-dev"])
@@ -1652,15 +1663,24 @@ def test_r3_quoted_builder_line_does_not_count(line):
     assert sc.builder_of_record(line) is None
 
 
-def test_r3_builder_section_wins_over_lines_elsewhere():
-    body = "## Issue\nCloses #7\nBuilder: @someone-else\n\n## Builder\nBuilder: @example-dev\n\n## Tier\ntier:low\n"
-    assert sc.builder_of_record(body) == "example-dev"
+def test_r4_repeated_builder_sections_all_count():
+    """Round 4 P2: a second `## Builder` section can't overwrite the first."""
+    body = ("## Issue\nCloses #7\n\n## Builder\nBuilder: @example-dev\n\n## Tier\ntier:low\n\n"
+            "## Builder\nBuilder: @example-other\n")
+    assert sc.builder_logins(body) == ["example-dev", "example-other"]
+    [f] = [f for f in v1run(v1_ctx(body=body)) if f.check == "builder-of-record"]
+    assert f.level == sc.VIOLATION and "more than one" in f.problem.lower()
+
+
+def test_r4_builder_line_outside_the_section_also_counts():
+    body = "## Issue\nCloses #7\nBuilder: @someone-else\n\n## Builder\nBuilder: @example-dev\n"
+    assert sc.builder_logins(body) == ["someone-else", "example-dev"]
+    assert sc.builder_of_record(body) is None
 
 
 def test_r3_multiple_distinct_builders_is_a_violation():
     body = _body_with_builder("Builder: @example-dev\nBuilder: @example-other")
     assert sc.builder_of_record(body) is None
-    assert sc.builder_logins(body) == ["example-dev", "example-other"]
     [f] = [f for f in v1run(v1_ctx(body=body)) if f.check == "builder-of-record"]
     assert f.level == sc.VIOLATION and "more than one" in f.problem.lower()
 
@@ -1671,7 +1691,6 @@ def test_r3_same_builder_twice_is_fine():
 
 
 def test_r3_no_ambiguous_builder_can_sign_off():
-    """With two Builder logins, neither may sign off (both are in the builder set)."""
     body = _body_with_builder(f"Builder: @example-dev\nBuilder: @{SIGNER}")
     ctx = v1_ctx(labels=("tier:high",), body=body, issues={7: {"labels": ["tier:high"], "comments": [signoff()]}})
     assert "tier" in checks(v1run(ctx), sc.VIOLATION)
