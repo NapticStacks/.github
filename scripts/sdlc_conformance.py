@@ -100,6 +100,8 @@ TIERS = ("low", "medium", "high")
 TIER_LABEL_RE = re.compile(r"^tier:(low|medium|high)$", re.I)
 BUILDER_RE = re.compile(r"^[ \t*-]*(?:\*\*)?builder(?:\*\*)?[ \t]*:(?:\*\*)?[ \t]*@?(app/[\w-]+|[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\[bot\])?)(?=[ \t]|$)",
                         re.I | re.M)
+BUILDER_LINE_RE = re.compile(r"^[ \t*-]*(?:\*\*)?builder(?:\*\*)?[ \t]*:", re.I)
+AT_LOGIN_RE = re.compile(r"(?<![\w@.])@(app/[\w-]+|[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\[bot\])?)")
 BUILDER_PLACEHOLDERS = {"na", "n-a", "none", "tbd", "tba", "todo", "unknown", "nobody", "swarm"}
 SELF_REVIEW_MARKER = "<!-- sdlc:self-review v1 -->"
 SECURITY_SIGNOFF_MARKER = "<!-- sdlc:security-signoff v1 -->"
@@ -266,18 +268,35 @@ def prose(body: str | None) -> str:
 def builder_logins(body: str | None) -> list[str]:
     """Distinct logins (lowercased, in order) on every `Builder:` line outside comments, fences and quotes,
     in every `## Builder` section and anywhere else. Placeholders are skipped. More than one is ambiguous."""
-    out = []
-    for m in BUILDER_RE.finditer(prose(body)):
-        login = m.group(1).lower()
-        if login not in BUILDER_PLACEHOLDERS and login not in out:
-            out.append(login)
-    return out
+    return _parse_builders(body)[0]
+
+
+def _parse_builders(body: str | None) -> tuple[list[str], bool]:
+    """(distinct logins, malformed). Each `Builder:` line gives its first token (strictly a login ending at
+    whitespace or end of line) plus every `@login` on the line. A line whose first token isn't a clean login,
+    or that names more than one login, is malformed: ambiguous, and all its logins stay in the builder set."""
+    out, malformed = [], False
+    for line in prose(body).splitlines():
+        if not BUILDER_LINE_RE.match(line):
+            continue
+        m = BUILDER_RE.match(line)
+        first = m.group(1).lower() if m else None
+        rest = line[m.end():] if m else line
+        tags = [t.lower() for t in AT_LOGIN_RE.findall(rest)]
+        if first in BUILDER_PLACEHOLDERS:
+            first = None
+        if (first is None and tags) or (first and tags):
+            malformed = True
+        for login in ([first] if first else []) + tags:
+            if login not in BUILDER_PLACEHOLDERS and login not in out:
+                out.append(login)
+    return out, malformed
 
 
 def builder_of_record(body: str | None) -> str | None:
-    """The one builder login, or None when there is none or more than one."""
-    logins = builder_logins(body)
-    return logins[0] if len(logins) == 1 else None
+    """The one builder login, or None when there is none, more than one, or a malformed Builder line."""
+    logins, malformed = _parse_builders(body)
+    return logins[0] if len(logins) == 1 and not malformed else None
 
 
 def label_names(labels) -> list[str]:
@@ -329,8 +348,11 @@ def edited_by_other(node: dict | None, author: str) -> bool:
     if not node:
         return True
     a = (author or "").lower()
-    edits = node.get("userContentEdits") or {}
-    if (edits.get("totalCount") or 0) > EDIT_HISTORY_MAX:
+    edits = node.get("userContentEdits")
+    if not isinstance(edits, dict) or not isinstance(edits.get("nodes"), list):
+        # No history to read: only a never-edited comment may pass.
+        return bool(node.get("lastEditedAt"))
+    if (edits.get("totalCount") or 0) > EDIT_HISTORY_MAX or len(edits["nodes"]) < (edits.get("totalCount") or 0):
         return True
     editors = [((e or {}).get("editor") or {}).get("login") for e in edits.get("nodes") or []]
     if node.get("lastEditedAt"):
@@ -541,9 +563,10 @@ def check_tier(repo, pr, ctx, opts, builders) -> list[Finding]:
 def check_builder(repo, pr, ctx, opts, builder, kind) -> list[Finding]:
     n = pr["number"]
     fix = f"Add `Builder: @<your login>` under the PR body's ## Builder section: gh pr edit {n} -R {repo} --body-file <file>"
-    logins = builder_logins(pr.get("body"))
-    if len(logins) > 1:
-        return [Finding("builder-of-record", VIOLATION, f"More than one Builder login: {', '.join(logins)}.",
+    logins, malformed = _parse_builders(pr.get("body"))
+    if len(logins) > 1 or (malformed and logins):
+        return [Finding("builder-of-record", VIOLATION,
+                        f"More than one Builder login, or a malformed Builder line: {', '.join(logins)}.",
                         "One human answers for the change. Every login named is in the builder set.",
                         f"Keep one `Builder:` line under ## Builder: gh pr edit {n} -R {repo} --body-file <file>")]
     level = NOTE if kind == "Dependabot" else VIOLATION

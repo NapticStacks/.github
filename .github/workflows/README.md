@@ -182,7 +182,8 @@ All of it skips PRs created before `cutover` (default `2026-10-16T00:00:00Z`). T
     over GraphQL; the gate never parses Closes/Fixes itself. A `Part of` or mentioned issue can raise the tier but
     never satisfy it: then only the PR sign-off works. No `security_signers` set means high always fails.
 - **`builder-of-record`:** every `Builder: @login` line in the body counts: in every `## Builder` section and
-  anywhere else (HTML comments, code fences and `>` quotes don't). Exactly one distinct login is allowed. It must be
+  anywhere else (HTML comments, code fences and `>` quotes don't). Exactly one distinct login, one per line (`@a @b` or
+  `@a, @b` is ambiguous: a violation, and every login named is barred from signing). It must be
   a real GitHub user account, not a bot, and on `builders`. With no `builders` set, that last part is a note. Bot and
   swarm PRs need the line too. Dependabot gets a note.
 - **`self-review`:** the builder posts a PR comment whose **first non-empty line** is exactly the marker, one

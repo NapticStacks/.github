@@ -1694,3 +1694,50 @@ def test_r3_no_ambiguous_builder_can_sign_off():
     body = _body_with_builder(f"Builder: @example-dev\nBuilder: @{SIGNER}")
     ctx = v1_ctx(labels=("tier:high",), body=body, issues={7: {"labels": ["tier:high"], "comments": [signoff()]}})
     assert "tier" in checks(v1run(ctx), sc.VIOLATION)
+
+
+# --- codex round 5 -----------------------------------------------------------------------
+
+@pytest.mark.parametrize("node", [
+    {"author": {"login": "example-dev"}, "lastEditedAt": "2026-10-20T12:00:00Z",
+     "editor": {"login": "example-dev"}, "userContentEdits": None},
+    {"author": {"login": "example-dev"}, "lastEditedAt": "2026-10-20T12:00:00Z", "editor": {"login": "example-dev"}},
+    {"author": {"login": "example-dev"}, "lastEditedAt": "2026-10-20T12:00:00Z", "editor": {"login": "example-dev"},
+     "userContentEdits": {"totalCount": 3, "nodes": [{"editor": {"login": "example-dev"}}]}},
+    {"author": {"login": "example-dev"}, "lastEditedAt": None,
+     "userContentEdits": {"totalCount": 2, "nodes": [{"editor": {"login": "example-dev"}}]}},
+])
+def test_r5_incomplete_edit_history_fails_closed(node):
+    assert sc.edited_by_other(node, "example-dev") is True
+
+
+def test_r5_unedited_comment_with_no_history_is_fine():
+    node = {"author": {"login": "example-dev"}, "lastEditedAt": None, "editor": None,
+            "userContentEdits": {"totalCount": 0, "nodes": []}}
+    assert sc.edited_by_other(node, "example-dev") is False
+
+
+@pytest.mark.parametrize("line", ["Builder: @example-dev @example-other", "Builder: @example-dev, @example-other",
+                                  "Builder: @example-dev and @example-other", "Builder: example-dev @example-other"])
+def test_r5_builder_line_with_two_logins_is_ambiguous(line):
+    body = _body_with_builder(line)
+    assert sc.builder_of_record(body) is None
+    assert set(sc.builder_logins(body)) == {"example-dev", "example-other"}
+    [f] = [f for f in v1run(v1_ctx(body=body)) if f.check == "builder-of-record"]
+    assert f.level == sc.VIOLATION and "more than one" in f.problem.lower()
+
+
+def test_r5_every_login_on_an_ambiguous_line_is_excluded_from_signing():
+    body = _body_with_builder(f"Builder: @example-dev, @{SIGNER}")
+    ctx = v1_ctx(labels=("tier:high",), body=body, issues={7: {"labels": ["tier:high"], "comments": [signoff()]}})
+    assert "tier" in checks(v1run(ctx), sc.VIOLATION)
+
+
+def test_r5_note_after_the_login_and_emails_are_not_logins():
+    assert sc.builder_of_record("Builder: @example-dev (pairing with Ben)") == "example-dev"
+    assert sc.builder_of_record("Builder: @example-dev ben@example.com") == "example-dev"
+
+
+def test_r5_malformed_single_login_line_says_ambiguous():
+    [f] = [f for f in v1run(v1_ctx(body=_body_with_builder("Builder: @example-dev,"))) if f.check == "builder-of-record"]
+    assert f.level == sc.VIOLATION and "malformed" in f.problem
