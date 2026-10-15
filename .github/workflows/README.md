@@ -173,26 +173,29 @@ jobs:
 All of it skips PRs created before `cutover` (default `2026-10-16T00:00:00Z`). Those finish under v2 rules.
 
 - **`tier`:** the highest `tier:*` label on the PR or its same-repo linked issues. None is a note (counts as medium).
-  `tier:high` fails without a comment carrying `<!-- sdlc:security-signoff v1 -->` on the linked issue or the PR,
-  from the first `security_signers` login (or a later one when the first one is the builder). Nobody signs off their
-  own work. No `security_signers` set means high always fails.
+  - A linked issue that can't be read (404) means tier unknown: a violation, never a silent medium.
+  - Only cross-repo issues linked and no `tier:*` on the PR: a violation. Add the label to the PR.
+  - `tier:high` needs a comment carrying `<!-- sdlc:security-signoff v1 -->` from the first `security_signers`
+    login (or a later one when the first one built it). It counts on a linked issue that itself carries
+    `tier:high`, or on the PR when the comment also names the full head SHA. A sign-off on another linked issue
+    is never borrowed.
+  - Neither the `Builder:` login nor the PR author can sign off. No `security_signers` set means high always fails.
 - **`builder-of-record`:** a `Builder: @login` line in the body (comments and code fences don't count). The login
   must be a real GitHub user account, not a bot, and on `builders`. With no `builders` set, that last part is a note.
   Bot and swarm PRs need the line too. Dependabot gets a note.
 - **`self-review`:** a comment by the builder with `<!-- sdlc:self-review v1 -->` and the full 40-character head
-  SHA, or a review by the builder carrying the marker on the head commit. A push makes it stale. `/closer` posts it.
+  SHA, or a review by the builder carrying the marker on the head commit. A push makes it stale. `/closer` posts
+  the marker and requests a reviewer (through `/sdlc-handoff`, being added in napticstack-skills 0.88.0).
+- **Edited markers don't count.** A marker comment or review counts only if nobody but its author ever edited it.
+  The gate reads each marker's edit history over GraphQL (`userContentEdits`, `editor`). If that read fails, the
+  gate exits 2. It never trusts an unchecked marker.
 - **Template:** post-cutover human PRs also need `## Builder`, `## Workstation`, `## Session` and `## Tier`
   (see the org [PR template](../pull_request_template.md)).
 - **`review_requested`** is a new caller trigger: `/closer` requests the reviewer right after it posts the marker,
   so the gate re-runs and sees it.
-- **Known gaps:** a tier label changed on the issue (not the PR) or a new comment doesn't re-run the check by itself.
-  The next PR event, or a re-run, picks it up.
-
-### Dependabot config template
-
-[`templates/dependabot.yml`](../../templates/dependabot.yml) covers npm, pip and GitHub Actions. Copy it to the
-repo's `.github/dependabot.yml` and delete the ecosystems the repo doesn't use. SAST and DAST are not here: Sugam
-sets that standard (naptic-sdlc#6).
+- **Known gaps (stale green):** the caller has no `issue_comment` or issue-label trigger. So a green result stays
+  green after a sign-off is deleted, or after a linked issue is raised to `tier:high`, until the next PR event or a
+  manual re-run. A new comment doesn't re-run it either. Re-run the check before you rely on it.
 
 ### v1 / v2 / v3 compatibility
 

@@ -408,8 +408,8 @@ def test_main_exit_2_on_checker_error(monkeypatch, capsys):
 
 def test_main_block_mode_returns_1(monkeypatch, capsys):
     ctx = make_ctx(additions=5000)
-    monkeypatch.setattr(sc, "gather", lambda api, repo, n, *_: ctx)
-    monkeypatch.setattr(sc, "issue_lookup_for", lambda api, repo: lookup_ok)
+    monkeypatch.setattr(sc, "gather", lambda api, repo, n, *_, **__: ctx)
+    monkeypatch.setattr(sc, "issue_lookup_for", lambda api, repo, *_: lookup_ok)
     monkeypatch.setenv("GH_TOKEN", "t0ken")
     assert sc.main(["--pr", "NapticStacks/example#42", "--mode", "block"]) == sc.EXIT_VIOLATIONS
     assert sc.main(["--pr", "NapticStacks/example#42", "--mode", "warn"]) == sc.EXIT_OK
@@ -417,8 +417,8 @@ def test_main_block_mode_returns_1(monkeypatch, capsys):
 
 def test_main_reads_repo_and_number_from_env(monkeypatch):
     seen = {}
-    monkeypatch.setattr(sc, "gather", lambda api, repo, n, *_: seen.update(repo=repo, n=n) or make_ctx())
-    monkeypatch.setattr(sc, "issue_lookup_for", lambda api, repo: lookup_ok)
+    monkeypatch.setattr(sc, "gather", lambda api, repo, n, *_, **__: seen.update(repo=repo, n=n) or make_ctx())
+    monkeypatch.setattr(sc, "issue_lookup_for", lambda api, repo, *_: lookup_ok)
     monkeypatch.setenv("GH_TOKEN", "t0ken")
     monkeypatch.setenv("SDLC_REPO", "NapticStacks/example")
     monkeypatch.setenv("SDLC_PR", "42")
@@ -562,8 +562,8 @@ def test_malformed_refs_are_not_links(ref):
 
 
 def test_reporting_failure_is_exit_2(monkeypatch, tmp_path):
-    monkeypatch.setattr(sc, "gather", lambda api, repo, n, *_: make_ctx())
-    monkeypatch.setattr(sc, "issue_lookup_for", lambda api, repo: lookup_ok)
+    monkeypatch.setattr(sc, "gather", lambda api, repo, n, *_, **__: make_ctx())
+    monkeypatch.setattr(sc, "issue_lookup_for", lambda api, repo, *_: lookup_ok)
     monkeypatch.setenv("GH_TOKEN", "t0ken")
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "missing-dir" / "summary.md"))
     assert sc.main(["--pr", "NapticStacks/example#42"]) == sc.EXIT_CHECKER_ERROR
@@ -916,13 +916,19 @@ V1_SECTIONS = ("\n## Builder\nBuilder: @example-dev\n\n## Workstation\nexample-b
                "## Session\nhttps://claude.ai/code/session_example\n\n## Tier\ntier:low\n")
 
 
-def self_review(login=BUILDER, sha=HEAD, body=None, at="2026-10-20T10:00:00Z"):
+def self_review(login=BUILDER, sha=HEAD, body=None, at="2026-10-20T10:00:00Z", edited_by_other=False):
     text = body if body is not None else f"{sc.SELF_REVIEW_MARKER}\nSelf-review done on head {sha}.\n"
-    return {"user": {"login": login}, "body": text, "created_at": at}
+    return {"user": {"login": login}, "body": text, "created_at": at, "node_id": f"IC_{login}_{at}",
+            "edited_by_other": edited_by_other}
 
 
-def signoff(login=SIGNER, at="2026-10-19T10:00:00Z"):
-    return {"user": {"login": login}, "body": f"{sc.SECURITY_SIGNOFF_MARKER}\nSigned off.", "created_at": at}
+def signoff(login=SIGNER, at="2026-10-19T10:00:00Z", sha=None, edited_by_other=False):
+    text = f"{sc.SECURITY_SIGNOFF_MARKER}\nSigned off." + (f" Head {sha}." if sha else "")
+    return {"user": {"login": login}, "body": text, "created_at": at, "node_id": f"IC_so_{login}_{at}",
+            "edited_by_other": edited_by_other}
+
+
+HIGH_SIGNED = {7: {"labels": ["tier:high"], "comments": []}}
 
 
 def v1_ctx(labels=("tier:low",), comments=None, issues=None, builder_account="User", **pr_overrides):
@@ -1028,29 +1034,101 @@ def test_v1_high_without_signoff_fails():
 
 
 def test_v1_high_with_signoff_on_the_issue_passes():
-    ctx = v1_ctx(labels=("tier:high",), issues={7: {"labels": [], "comments": [signoff()]}})
+    ctx = v1_ctx(labels=("tier:high",), issues={7: {"labels": ["tier:high"], "comments": [signoff()]}})
     assert v1run(ctx) == []
 
 
 def test_v1_high_with_signoff_on_the_pr_passes():
-    ctx = v1_ctx(labels=("tier:high",), comments=[self_review(), signoff()])
+    ctx = v1_ctx(labels=("tier:high",), comments=[self_review(), signoff(sha=HEAD)])
     assert v1run(ctx) == []
+
+
+def test_v1_pr_level_signoff_must_name_the_head_sha():
+    ctx = v1_ctx(labels=("tier:high",), comments=[self_review(), signoff()])
+    assert "tier" in checks(v1run(ctx), sc.VIOLATION)
+    ctx = v1_ctx(labels=("tier:high",), comments=[self_review(), signoff(sha="c" * 40)])
+    assert "tier" in checks(v1run(ctx), sc.VIOLATION)
+
+
+def test_v1_borrowed_signoff_from_another_linked_issue_does_not_count():
+    """F1: #7 is tier:high and unsigned; #5 was signed for other work. Linking both must not pass."""
+    body = v1_ctx()["pr"]["body"].replace("Closes #7\n", "Closes #7\nPart of #5\n")
+    ctx = v1_ctx(labels=(), body=body, issues={7: {"labels": ["tier:high"], "comments": []},
+                                               5: {"labels": ["tier:low"], "comments": [signoff()]}})
+    assert "tier" in checks(v1run(ctx), sc.VIOLATION)
+
+
+def test_v1_signoff_on_an_issue_without_tier_high_does_not_count_for_a_high_pr_label():
+    ctx = v1_ctx(labels=("tier:high",), issues={7: {"labels": [], "comments": [signoff()]}})
+    assert "tier" in checks(v1run(ctx), sc.VIOLATION)
+
+
+@pytest.mark.parametrize("where", ["issue", "pr"])
+def test_v1_signoff_edited_by_someone_else_does_not_count(where):
+    """F2: an engineer appends the hidden marker to an old Security Ops comment."""
+    forged = signoff(sha=HEAD, edited_by_other=True)
+    if where == "issue":
+        ctx = v1_ctx(labels=("tier:high",), issues={7: {"labels": ["tier:high"], "comments": [forged]}})
+    else:
+        ctx = v1_ctx(labels=("tier:high",), comments=[self_review(), forged])
+    assert "tier" in checks(v1run(ctx), sc.VIOLATION)
+
+
+def test_v1_marker_comment_without_edit_info_does_not_count():
+    """Fail closed: a marker comment the gate couldn't check for edits is ignored."""
+    c = signoff(); del c["edited_by_other"]
+    ctx = v1_ctx(labels=("tier:high",), issues={7: {"labels": ["tier:high"], "comments": [c]}})
+    assert "tier" in checks(v1run(ctx), sc.VIOLATION)
+    c = self_review(); del c["edited_by_other"]
+    assert "self-review" in checks(v1run(v1_ctx(comments=[c])), sc.VIOLATION)
+
+
+def test_v1_self_review_edited_by_someone_else_does_not_count():
+    assert "self-review" in checks(v1run(v1_ctx(comments=[self_review(edited_by_other=True)])), sc.VIOLATION)
+
+
+def test_v1_pr_author_cannot_sign_off_even_when_builder_is_someone_else():
+    """F3: a signer authors the PR and names a teammate as Builder."""
+    ctx = v1_ctx(labels=("tier:high",), user={"login": SIGNER},
+                 issues={7: {"labels": ["tier:high"], "comments": [signoff()]}})
+    assert "tier" in checks(v1run(ctx), sc.VIOLATION)
+
+
+def test_v1_missing_linked_issue_means_tier_unknown():
+    """F5: a 404 on a linked issue is never a silent medium."""
+    ctx = v1_ctx(labels=(), issues={7: None})
+    [f] = [f for f in v1run(ctx) if f.check == "tier"]
+    assert f.level == sc.VIOLATION and "#7" in f.problem
+
+
+def test_v1_only_cross_repo_issues_and_no_pr_tier_label_is_a_violation():
+    """F6: the tier may live on an issue the token can't read."""
+    body = v1_ctx()["pr"]["body"].replace("Closes #7\n", "Part of NapticStacks/other#3\n")
+    [f] = [f for f in v1run(v1_ctx(labels=(), body=body, issues={})) if f.check == "tier"]
+    assert f.level == sc.VIOLATION and "tier label to the PR" in f.fix
+
+
+def test_v1_cross_repo_issue_with_a_pr_tier_label_passes():
+    body = v1_ctx()["pr"]["body"].replace("Closes #7\n", "Part of NapticStacks/other#3\n")
+    assert [(f.check, f.level) for f in v1run(v1_ctx(labels=("tier:low",), body=body, issues={}))] == [
+        ("issue-link", sc.NOTE)]
 
 
 @pytest.mark.parametrize("comment", [
     signoff(login="drive-by-user"),                                       # not a signer
-    {"user": {"login": SIGNER}, "body": "LGTM, signed off", "created_at": "2026-10-19T10:00:00Z"},  # no marker
+    {"user": {"login": SIGNER}, "body": "LGTM, signed off", "created_at": "2026-10-19T10:00:00Z",
+     "edited_by_other": False},                                           # no marker
     signoff(login=BACKUP_SIGNER),                                         # backup only when the primary built it
 ])
 def test_v1_high_signoff_that_does_not_count(comment):
-    ctx = v1_ctx(labels=("tier:high",), issues={7: {"labels": [], "comments": [comment]}})
+    ctx = v1_ctx(labels=("tier:high",), issues={7: {"labels": ["tier:high"], "comments": [comment]}})
     assert "tier" in checks(v1run(ctx), sc.VIOLATION)
 
 
 def test_v1_backup_signer_counts_when_the_primary_built_it():
     body = make_ctx()["pr"]["body"].replace("Closes #7\n", "Closes #7\n" + V1_SECTIONS.replace(BUILDER, SIGNER))
     ctx = v1_ctx(labels=("tier:high",), body=body, comments=[self_review(login=SIGNER)],
-                 issues={7: {"labels": [], "comments": [signoff(login=BACKUP_SIGNER)]}})
+                 issues={7: {"labels": ["tier:high"], "comments": [signoff(login=BACKUP_SIGNER)]}})
     opts = sc.Options(builders=(SIGNER,), security_signers=(SIGNER, BACKUP_SIGNER))
     assert v1run(ctx, opts) == []
 
@@ -1058,13 +1136,13 @@ def test_v1_backup_signer_counts_when_the_primary_built_it():
 def test_v1_builder_cannot_sign_off_their_own_high_tier_work():
     body = make_ctx()["pr"]["body"].replace("Closes #7\n", "Closes #7\n" + V1_SECTIONS.replace(BUILDER, SIGNER))
     ctx = v1_ctx(labels=("tier:high",), body=body, comments=[self_review(login=SIGNER)],
-                 issues={7: {"labels": [], "comments": [signoff(login=SIGNER)]}})
+                 issues={7: {"labels": ["tier:high"], "comments": [signoff(login=SIGNER)]}})
     opts = sc.Options(builders=(SIGNER,), security_signers=(SIGNER, BACKUP_SIGNER))
     assert "tier" in checks(v1run(ctx, opts), sc.VIOLATION)
 
 
 def test_v1_high_with_no_signers_configured_fails_closed():
-    ctx = v1_ctx(labels=("tier:high",), issues={7: {"labels": [], "comments": [signoff()]}})
+    ctx = v1_ctx(labels=("tier:high",), issues={7: {"labels": ["tier:high"], "comments": [signoff()]}})
     opts = sc.Options(builders=V1_OPTS.builders)
     [f] = [f for f in v1run(ctx, opts) if f.check == "tier"]
     assert f.level == sc.VIOLATION and "security_signers" in f.cause
@@ -1081,6 +1159,17 @@ def _body_with_builder(line):
                                   "**Builder:** @example-dev", "builder: example-dev", "Builder: @Example-Dev"])
 def test_v1_builder_line_forms(line):
     assert sc.builder_of_record(_body_with_builder(line)).lower() == BUILDER
+
+
+@pytest.mark.parametrize("line", ["Builder: N/A because the swarm built it", "Builder: TBD", "Builder: none",
+                                  "Builder: n/a", "Builder: @x,y", "Builder: @me/you", "Builder: unknown"])
+def test_v1_placeholder_or_malformed_builder_is_no_builder(line):
+    """F8: the login must end at whitespace or end of line, and placeholders aren't logins."""
+    assert sc.builder_of_record(line) is None
+
+
+def test_v1_builder_followed_by_a_note_still_parses():
+    assert sc.builder_of_record("Builder: @example-dev (pairing with Ben)") == "example-dev"
 
 
 def test_v1_builder_line_inside_a_comment_or_fence_does_not_count():
@@ -1147,7 +1236,10 @@ def test_v1_dependabot_builder_and_self_review_are_notes():
 
 def test_v1_no_marker_fails_and_names_closer():
     [f] = [f for f in v1run(v1_ctx(comments=[])) if f.check == "self-review"]
-    assert f.level == sc.VIOLATION and "/closer" in f.fix
+    assert f.level == sc.VIOLATION and "/closer" in f.fix and "requests a reviewer" in f.fix
+    for g in v1run(v1_ctx(comments=[])):
+        assert "never merges" not in (g.cause + g.fix)
+    assert "napticstack-skills 0.88.0" in f.cause
 
 
 def test_v1_marker_on_an_older_head_is_stale():
@@ -1177,7 +1269,8 @@ def test_v1_newest_marker_on_head_counts_even_after_a_stale_one():
 def test_v1_marker_in_a_review_on_head_counts():
     ctx = v1_ctx(comments=[])
     ctx["reviews"].append({"user": {"login": BUILDER}, "state": "COMMENTED", "commit_id": HEAD,
-                           "submitted_at": "2026-10-20T10:00:00Z", "body": f"## Three-lens review\n{sc.SELF_REVIEW_MARKER}"})
+                           "submitted_at": "2026-10-20T10:00:00Z", "body": f"## Three-lens review\n{sc.SELF_REVIEW_MARKER}",
+                           "edited_by_other": False})
     assert v1run(ctx) == []
 
 
@@ -1222,6 +1315,31 @@ def test_v1_readiness_uses_the_v1_template_after_cutover():
 
 # gather + CLI for v1
 
+class GraphTransport(FakeTransport):
+    """FakeTransport plus GraphQL POSTs. `graph` maps node id -> edit info, or is an int status to raise."""
+    def __init__(self, routes, graph=None):
+        super().__init__(routes)
+        self.graph, self.queries = graph if graph is not None else {}, []
+
+    def __call__(self, url, headers, data=None):
+        if data is None:
+            return super().__call__(url, headers)
+        assert url == sc.API + "/graphql"
+        q = json.loads(data)
+        self.queries.append(q)
+        if isinstance(self.graph, int):
+            raise sc.ApiError(self.graph, url)
+        ids = q["variables"]["ids"]
+        return {"data": {"nodes": [self.graph.get(i) for i in ids]}}
+
+
+def gnode(author, editors=(), edited=False, total=None):
+    return {"author": {"login": author}, "lastEditedAt": "2026-10-20T12:00:00Z" if edited else None,
+            "editor": {"login": editors[-1]} if editors else None,
+            "userContentEdits": {"totalCount": len(editors) if total is None else total,
+                                 "nodes": [{"editor": {"login": e}} for e in editors]}}
+
+
 def v1_routes(pr_extra=None, issue_labels=(), issue_comments=(), comments=(), user_type="User"):
     routes = pr_routes(pr_extra={"created_at": V1_CREATED, **(pr_extra or {})})
     routes = {"/repos/NapticStacks/example/issues/42/comments": paged(list(comments)),
@@ -1234,25 +1352,87 @@ def v1_routes(pr_extra=None, issue_labels=(), issue_comments=(), comments=(), us
 
 def test_v1_gather_reads_comments_issue_labels_and_the_builder_account():
     body = make_ctx()["pr"]["body"].replace("Closes #7\n", "Closes #7\n" + V1_SECTIONS)
-    transport = FakeTransport(v1_routes({"body": body}, issue_labels=["tier:medium"], comments=[self_review()]))
+    rc = self_review(); del rc["edited_by_other"]
+    transport = GraphTransport(v1_routes({"body": body}, issue_labels=["tier:medium"], comments=[rc]),
+                               {rc["node_id"]: gnode(BUILDER)})
     ctx = sc.gather(sc.Api("t0ken", transport), REPO, 42)
     assert ctx["comments"][0]["user"]["login"] == BUILDER
+    assert ctx["comments"][0]["edited_by_other"] is False
     assert ctx["linked_issues"][7]["labels"] == ["tier:medium"]
     assert ctx["linked_issues"][7]["comments"] == []  # comments are read only for tier:high
     assert ctx["builder_account"] == {"login": "example-dev", "type": "User"}
 
 
 def test_v1_gather_reads_issue_comments_for_high_tier():
-    transport = FakeTransport(v1_routes({"body": "Closes #7\nBuilder: @example-dev"},
-                                        issue_labels=["tier:high"], issue_comments=[signoff()]))
+    so = signoff(); del so["edited_by_other"]
+    transport = GraphTransport(v1_routes({"body": "Closes #7\nBuilder: @example-dev"},
+                                         issue_labels=["tier:high"], issue_comments=[so]),
+                               {so["node_id"]: gnode(SIGNER, editors=["example-dev"], edited=True)})
     ctx = sc.gather(sc.Api("t0ken", transport), REPO, 42)
     assert ctx["linked_issues"][7]["comments"][0]["user"]["login"] == SIGNER
+    assert ctx["linked_issues"][7]["comments"][0]["edited_by_other"] is True
+
+
+@pytest.mark.parametrize("node,expected", [
+    (gnode("example-dev"), False),                                               # never edited
+    (gnode("example-dev", editors=["example-dev"], edited=True), False),         # edited by the author
+    (gnode("example-dev", editors=["Example-Dev", "mallory"], edited=True), True),  # someone else in the history
+    (gnode("example-dev", editors=["mallory", "example-dev"], edited=True), True),  # author re-edit doesn't launder it
+    (gnode("example-dev", editors=["example-dev"], edited=True, total=101), True),  # history too long to check
+    ({**gnode("example-dev", edited=True), "editor": None}, True),               # edited by a deleted account
+    (None, True),                                                                 # node not returned
+])
+def test_v1_edit_history_rules(node, expected):
+    assert sc.edited_by_other(node, "example-dev") is expected
+
+
+def test_v1_graphql_failure_is_a_checker_error():
+    """F2: if the edit history can't be read, exit 2. Never trust the marker."""
+    rc = self_review(); del rc["edited_by_other"]
+    transport = GraphTransport(v1_routes({"body": "Closes #7\nBuilder: @example-dev"}, comments=[rc]), graph=502)
+    with pytest.raises(sc.CheckerError):
+        sc.gather(sc.Api("t0ken", transport), REPO, 42)
+
+
+def test_v1_graphql_errors_payload_is_a_checker_error():
+    rc = self_review(); del rc["edited_by_other"]
+    routes = v1_routes({"body": "Closes #7\nBuilder: @example-dev"}, comments=[rc])
+    class Errs(GraphTransport):
+        def __call__(self, url, headers, data=None):
+            if data is None:
+                return super().__call__(url, headers)
+            return {"errors": [{"message": "rate limited"}]}
+    with pytest.raises(sc.CheckerError):
+        sc.gather(sc.Api("t0ken", Errs(routes)), REPO, 42)
+
+
+def test_v1_no_marker_comments_means_no_graphql_call():
+    plain = {"user": {"login": "x"}, "body": "hi", "node_id": "IC_x"}
+    transport = GraphTransport(v1_routes({"body": "Closes #7\nBuilder: @example-dev"}, comments=[plain]))
+    sc.gather(sc.Api("t0ken", transport), REPO, 42)
+    assert transport.queries == []
+
+
+def test_v1_gather_fetches_each_linked_issue_once_and_main_reuses_it(monkeypatch):
+    """F5: check_issue_link reuses the issue gather_v1 already read."""
+    transport = GraphTransport(v1_routes({"body": "Closes #7\nBuilder: @example-dev"}))
+    monkeypatch.setenv("GH_TOKEN", "t0ken")
+    monkeypatch.setattr(sc, "_urllib_fetch", transport)
+    sc.main(["--pr", "NapticStacks/example#42"])
+    assert sum(u.endswith("/issues/7") for u in transport.seen) == 1
+
+
+def test_v1_post_ready_skips_the_v1_reads(monkeypatch):
+    """F12: readiness only needs the cutover decision."""
+    transport = PostTransport(ready_routes(pr_extra={"created_at": V1_CREATED}))
+    main_ready(monkeypatch, transport)
+    assert not any("/comments" in u or "/users/" in u or u.endswith("/issues/7") for u in transport.seen)
 
 
 def test_v1_gather_unknown_builder_is_none():
     routes = v1_routes({"body": "Closes #7\nBuilder: @example-dev"})
     routes["/users/example-dev"] = 404
-    ctx = sc.gather(sc.Api("t0ken", FakeTransport(routes)), REPO, 42)
+    ctx = sc.gather(sc.Api("t0ken", GraphTransport(routes)), REPO, 42)
     assert ctx["builder_account"] is None
 
 
@@ -1265,8 +1445,8 @@ def test_v1_gather_skips_v1_reads_before_cutover():
 
 def test_v1_gather_skips_cross_repo_and_missing_issues():
     routes = v1_routes({"body": "Part of NapticStacks/other#3\nCloses #9\nBuilder: @example-dev"})
-    ctx = sc.gather(sc.Api("t0ken", FakeTransport(routes)), REPO, 42)
-    assert ctx["linked_issues"] == {}
+    ctx = sc.gather(sc.Api("t0ken", GraphTransport(routes)), REPO, 42)
+    assert ctx["linked_issues"] == {9: None}  # cross-repo skipped; a 404 is recorded as unknown
 
 
 def test_v1_main_passes_the_new_flags(monkeypatch):
@@ -1318,8 +1498,4 @@ def test_v1_caller_template_pins_v3_and_reruns_on_v1_events():
     props = json.loads((CALLER_TEMPLATE.parent / "sdlc.properties.json").read_text())
     assert props["name"] and props["description"]
 
-
-def test_v1_dependabot_template_covers_npm_pip_and_actions():
-    text = (Path(__file__).parent.parent / "templates" / "dependabot.yml").read_text()
-    for eco in ('"npm"', '"pip"', '"github-actions"'):
-        assert f"package-ecosystem: {eco}" in text, eco
+    assert '# cutover: "2026-10-16T00:00:00Z"' in text  # F11: set per repo at adoption

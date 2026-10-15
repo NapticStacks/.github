@@ -98,8 +98,9 @@ MARKER_STATES = ("APPROVED", "COMMENTED", "CHANGES_REQUESTED")
 CUTOVER = "2026-10-16T00:00:00Z"
 TIERS = ("low", "medium", "high")
 TIER_LABEL_RE = re.compile(r"^tier:(low|medium|high)$", re.I)
-BUILDER_RE = re.compile(r"^[ \t>*-]*(?:\*\*)?builder(?:\*\*)?[ \t]*:(?:\*\*)?[ \t]*@?(app/[\w-]+|[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\[bot\])?)",
+BUILDER_RE = re.compile(r"^[ \t>*-]*(?:\*\*)?builder(?:\*\*)?[ \t]*:(?:\*\*)?[ \t]*@?(app/[\w-]+|[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\[bot\])?)(?=[ \t]|$)",
                         re.I | re.M)
+BUILDER_PLACEHOLDERS = {"na", "n-a", "none", "tbd", "tba", "todo", "unknown", "nobody", "swarm"}
 SELF_REVIEW_MARKER = "<!-- sdlc:self-review v1 -->"
 SECURITY_SIGNOFF_MARKER = "<!-- sdlc:security-signoff v1 -->"
 SHA_RE = re.compile(r"(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])")
@@ -265,7 +266,9 @@ def prose(body: str | None) -> str:
 def builder_of_record(body: str | None) -> str | None:
     """The login on the first `Builder:` line outside comments and fences, or None."""
     m = BUILDER_RE.search(prose(body))
-    return m.group(1) if m else None
+    if not m or m.group(1).lower() in BUILDER_PLACEHOLDERS:
+        return None
+    return m.group(1)
 
 
 def label_names(labels) -> list[str]:
@@ -281,6 +284,30 @@ def effective_tier(labels) -> str | None:
 
 def _login(item: dict) -> str:
     return ((item.get("user") or {}).get("login") or "").lower()
+
+
+def trusted_marker(item: dict) -> bool:
+    """A marker comment or review counts only when gather proved nobody but its author edited it.
+    No edit info (`edited_by_other` absent) means unproven, so it doesn't count."""
+    return item.get("edited_by_other") is False
+
+
+EDIT_HISTORY_MAX = 100
+
+
+def edited_by_other(node: dict | None, author: str) -> bool:
+    """True unless the GraphQL node shows every edit was made by `author`. Fails closed:
+    a missing node, a deleted editor, or a history longer than one page all count as edited by someone else."""
+    if not node:
+        return True
+    a = (author or "").lower()
+    edits = node.get("userContentEdits") or {}
+    if (edits.get("totalCount") or 0) > EDIT_HISTORY_MAX:
+        return True
+    editors = [((e or {}).get("editor") or {}).get("login") for e in edits.get("nodes") or []]
+    if node.get("lastEditedAt"):
+        editors.append(((node.get("editor") or {}).get("login")))
+    return any((e or "").lower() != a for e in editors)
 
 
 # --- the checks ----------------------------------------------------------------------
@@ -427,11 +454,24 @@ def check_options(repo, pr, files, opts, read_file, present=None) -> list[Findin
 
 def check_tier(repo, pr, ctx, opts, builder) -> list[Finding]:
     n = pr["number"]
-    issues = ctx.get("linked_issues") or {}
-    labels = label_names(pr.get("labels")) + [l for i in issues.values() for l in label_names(i.get("labels"))]
-    tier = effective_tier(labels)
     label = f"gh pr edit {n} -R {repo} --add-label tier:<low|medium|high>"
+    linked = ctx.get("linked_issues") or {}
+    issues = {k: v for k, v in linked.items() if v is not None}
+    pr_tier = effective_tier(pr.get("labels"))
+    missing = sorted(k for k, v in linked.items() if v is None)
+    if missing and pr_tier is None:
+        refs = ", ".join(f"#{k}" for k in missing)
+        return [Finding("tier", VIOLATION, f"Tier unknown: linked issue {refs} could not be read.",
+                        "The tier may live on that issue. A missing issue never counts as medium.",
+                        f"Fix the issue link, or add a tier label to the PR: {label}")]
+    tier = effective_tier(label_names(pr.get("labels")) + [l for i in issues.values() for l in i.get("labels") or []])
     if tier is None:
+        owner, name = repo.lower().split("/")
+        cross = [r for r in issue_refs(pr.get("body")) if r[0] and (r[0].lower(), r[1].lower()) != (owner, name)]
+        if cross and not issues:
+            return [Finding("tier", VIOLATION, "No tier label, and the only linked issues are in other repos.",
+                            "The gate can't read another repo's issue, so its tier label is invisible here.",
+                            f"Add a tier label to the PR: {label}")]
         return [Finding("tier", NOTE, "No tier label: this PR counts as medium.",
                         "The tier comes from a tier:* label on the PR or its linked issue. Untagged work is medium.",
                         f"Label it: {label}")]
@@ -442,17 +482,27 @@ def check_tier(repo, pr, ctx, opts, builder) -> list[Finding]:
         return [Finding("tier", VIOLATION, "tier:high without a security sign-off.",
                         "This caller sets no `security_signers`, so no sign-off can count. High tier fails closed.",
                         "Set `security_signers:` in the repo's .github/workflows/sdlc.yml (Security Ops first, then the backup).")]
-    # The first signer signs; a later one only when the first one built it. Nobody signs off their own work.
+    # The first signer signs; a later one only when the first one built it. Nobody signs off their own work:
+    # neither the Builder line nor the PR author.
     b = (builder or "").lower()
+    author = _login(pr)
     allowed = {signers[0]} if signers[0] != b else set(signers[1:])
-    allowed.discard(b)
-    comments = list(ctx.get("comments") or []) + [c for i in issues.values() for c in i.get("comments") or []]
-    if any(_login(c) in allowed and SECURITY_SIGNOFF_MARKER in (c.get("body") or "") for c in comments):
+    allowed -= {b, author}
+    head = pr["head"]["sha"]
+
+    def signs(c, need_sha):
+        return (_login(c) in allowed and SECURITY_SIGNOFF_MARKER in (c.get("body") or "") and trusted_marker(c)
+                and (not need_sha or head in SHA_RE.findall(c.get("body") or "")))
+    # A sign-off counts on the PR (naming the head SHA) or on a linked issue that itself carries tier:high.
+    # A sign-off on some other linked issue was given for other work and is never borrowed.
+    high_issues = [i for i in issues.values() if effective_tier(i.get("labels")) == "high"]
+    if any(signs(c, True) for c in ctx.get("comments") or []) or any(
+            signs(c, False) for i in high_issues for c in i.get("comments") or []):
         return []
-    who = ", ".join(sorted(allowed)) or "nobody (every signer is the builder)"
+    who = ", ".join(sorted(allowed)) or "nobody (every signer built or authored this PR)"
     return [Finding("tier", VIOLATION, "tier:high without a security sign-off.",
-                    f"High tier needs a Security Ops comment with `{SECURITY_SIGNOFF_MARKER}` on the linked issue "
-                    f"(or this PR) from: {who}.",
+                    f"High tier needs a comment with `{SECURITY_SIGNOFF_MARKER}` from: {who}. It counts on the "
+                    f"tier:high issue, or on this PR when it names the head SHA {head[:7]}.",
                     "Ask Security Ops to review the plan and post the sign-off comment on the issue, then re-run the check.")]
 
 
@@ -490,7 +540,7 @@ def check_builder(repo, pr, ctx, opts, builder, kind) -> list[Finding]:
 def check_self_review(repo, pr, ctx, builder, kind) -> list[Finding]:
     head = pr["head"]["sha"]
     level = NOTE if kind == "Dependabot" else VIOLATION
-    fix = "Run /closer on the branch: it runs the reviews and /sdlc-handoff, which posts a fresh marker. It never merges."
+    fix = "Run /closer on the branch: it runs /naptic-review, posts the self-review marker on the head commit and requests a reviewer."
     if builder is None:
         return [Finding("self-review", level, "No self-review: there is no builder of record.",
                         "The marker counts only from the builder of record. Fix builder-of-record first.", fix)]
@@ -498,6 +548,7 @@ def check_self_review(repo, pr, ctx, builder, kind) -> list[Finding]:
     marks = [c for c in ctx.get("comments") or [] if SELF_REVIEW_MARKER in (c.get("body") or "")]
     marks += [r for r in ctx.get("reviews") or [] if SELF_REVIEW_MARKER in (r.get("body") or "")
               and r.get("state") != "DISMISSED"]
+    marks = [m for m in marks if trusted_marker(m)]  # an edit by anyone but the author voids it
     mine = [m for m in marks if _login(m) == b]
     # A comment names the head SHA in full; a review is bound to its commit_id by GitHub.
     on_head = [m for m in mine
@@ -512,7 +563,8 @@ def check_self_review(repo, pr, ctx, builder, kind) -> list[Finding]:
                         "Only the builder of record's own marker counts.", fix)]
     return [Finding("self-review", level, "No self-review marker on this PR.",
                     f"The builder posts `{SELF_REVIEW_MARKER}` with the head SHA after /naptic-review "
-                    "(and /cso for medium and high).", fix)]
+                    "(and /cso for medium and high). /closer does it through /sdlc-handoff, "
+                    "which is being added in napticstack-skills 0.88.0.", fix)]
 
 
 def check_v1(repo, pr, ctx, opts, kind) -> list[Finding]:
@@ -739,7 +791,7 @@ class Api:
             page += 1
 
 
-def gather(api: Api, repo: str, number: int, cutover: str = CUTOVER) -> dict:
+def gather(api: Api, repo: str, number: int, cutover: str = CUTOVER, v1_reads: bool = True) -> dict:
     pr = api.get(f"/repos/{repo}/pulls/{number}")
     entries = api.paged(f"/repos/{repo}/pulls/{number}/files")
     if len(entries) != pr.get("changed_files"):
@@ -755,35 +807,64 @@ def gather(api: Api, repo: str, number: int, cutover: str = CUTOVER) -> dict:
             files.append(e["previous_filename"])
     reviews = api.paged(f"/repos/{repo}/pulls/{number}/reviews")
     ctx = {"repo": repo, "pr": pr, "files": files, "present": present, "reviews": reviews}
-    if is_v1(pr, Options(cutover=cutover)):
+    if v1_reads and is_v1(pr, Options(cutover=cutover)):
         gather_v1(api, ctx)
     return ctx
 
 
+EDIT_QUERY = """query($ids: [ID!]!) { nodes(ids: $ids) { ... on Comment {
+  author { login } lastEditedAt editor { login }
+  userContentEdits(first: 100) { totalCount nodes { editor { login } } } } } }"""
+
+
+def mark_edits(api: Api, items: list[dict]) -> None:
+    """Set `edited_by_other` on every comment or review that carries a V1 marker, from its GraphQL edit
+    history. The REST author never changes on an edit, and the marker is invisible once rendered, so an
+    edit by anyone but the author would otherwise forge it. Any failure is a checker error (exit 2)."""
+    marked = [i for i in items if SELF_REVIEW_MARKER in (i.get("body") or "")
+              or SECURITY_SIGNOFF_MARKER in (i.get("body") or "")]
+    for start in range(0, len(marked), PER_PAGE):
+        batch = marked[start:start + PER_PAGE]
+        ids = [i.get("node_id") for i in batch]
+        if not all(ids):
+            raise CheckerError("a marker comment came back without a node_id, so its edit history can't be checked")
+        resp = api.post("/graphql", {"query": EDIT_QUERY, "variables": {"ids": ids}})
+        nodes = (resp or {}).get("data", {}).get("nodes") if not (resp or {}).get("errors") else None
+        if nodes is None or len(nodes) != len(batch):
+            raise CheckerError(f"could not read comment edit history: {(resp or {}).get('errors') or 'no data'}")
+        for item, node in zip(batch, nodes):
+            item["edited_by_other"] = edited_by_other(node, _login(item))
+
+
 def gather_v1(api: Api, ctx: dict) -> None:
-    """The extra reads the V1 checks need: PR comments, same-repo linked issues
-    (labels; comments only for tier:high), and the builder's account type.
-    Cross-repo issues are skipped: the caller's token can't read them."""
+    """The extra reads the V1 checks need: PR comments, same-repo linked issues (each read once;
+    a 404 is recorded as None, meaning tier unknown), comments on the tier:high issues, the edit
+    history of every marker comment, and the builder's account type. Cross-repo issues are skipped:
+    the caller's token can't read them."""
     repo, pr = ctx["repo"], ctx["pr"]
     owner, name = repo.split("/")
     ctx["comments"] = api.paged(f"/repos/{repo}/issues/{pr['number']}/comments")
-    issues = {}
+    issues, raw = {}, {}
     for o, r, n in issue_refs(pr.get("body")):
-        if (o and (o.lower(), r.lower()) != (owner.lower(), name.lower())) or n in issues:
+        if (o and (o.lower(), r.lower()) != (owner.lower(), name.lower())) or n in raw:
             continue
         try:
-            issue = api.get(f"/repos/{repo}/issues/{n}")
+            raw[n] = api.get(f"/repos/{repo}/issues/{n}")
         except ApiError as e:
-            if e.status == 404:
-                continue
-            raise
-        if "pull_request" not in issue:
-            issues[n] = {"labels": label_names(issue.get("labels")), "comments": []}
+            if e.status != 404:
+                raise
+            raw[n] = None
+        if raw[n] is None:
+            issues[n] = None
+        elif "pull_request" not in raw[n]:
+            issues[n] = {"labels": label_names(raw[n].get("labels")), "comments": []}
+    ctx["issue_cache"] = raw
     ctx["linked_issues"] = issues
-    labels = label_names(pr.get("labels")) + [l for i in issues.values() for l in i["labels"]]
-    if effective_tier(labels) == "high":
-        for n, issue in issues.items():
+    for n, issue in issues.items():
+        if issue is not None and effective_tier(issue["labels"]) == "high":
             issue["comments"] = api.paged(f"/repos/{repo}/issues/{n}/comments")
+    mark_edits(api, ctx["comments"] + ctx["reviews"]
+               + [c for i in issues.values() if i for c in i["comments"]])
     builder = builder_of_record(pr.get("body"))
     if builder and author_kind(builder) == "Human":
         try:
@@ -795,8 +876,11 @@ def gather_v1(api: Api, ctx: dict) -> None:
             ctx["builder_account"] = None
 
 
-def issue_lookup_for(api: Api, repo: str):
+def issue_lookup_for(api: Api, repo: str, cache: dict | None = None):
     def lookup(n: int):
+        if cache is not None and n in cache:  # gather_v1 already read it: one read per issue
+            issue = cache[n]
+            return None if issue is None else ("pr" if "pull_request" in issue else "issue")
         try:
             issue = api.get(f"/repos/{repo}/issues/{n}")
         except ApiError as e:
@@ -897,10 +981,11 @@ def main(argv=None) -> int:
             repo, number = os.environ["SDLC_REPO"], int(os.environ["SDLC_PR"])
         parse_time(opts.cutover)  # a bad --cutover is a checker error, never a silent skip
         api = Api(_token())
-        ctx = gather(api, repo, number, opts.cutover)
+        # The ready job only needs the cutover decision, never the V1 reads.
+        ctx = gather(api, repo, number, opts.cutover, v1_reads=not args.post_ready)
         if args.post_ready:
             return post_ready(api, ctx, opts, in_actions)
-        findings = evaluate(ctx, opts, issue_lookup_for(api, repo), read_file_for(api, repo))
+        findings = evaluate(ctx, opts, issue_lookup_for(api, repo, ctx.get("issue_cache")), read_file_for(api, repo))
         _print(findings, opts, in_actions)
     except Exception as e:  # noqa: BLE001 -- any failure here is the gate's, never the PR's (E1: exit 2)
         msg = (f"Checker error, gate bug, not your PR: {e}. Re-run the job; if it fails "

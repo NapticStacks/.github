@@ -36,3 +36,4 @@ jobs:
       trusted_reviewers: "maydaycyber"
       builders: ""
       security_signers: ""
+      # cutover: "2026-10-16T00:00:00Z"  # set per repo at adoption: PRs opened before it skip the V1 checks

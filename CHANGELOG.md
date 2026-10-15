@@ -10,8 +10,9 @@
 - Template: post-cutover human PRs also need `## Builder`, `## Workstation`, `## Session`, `## Tier`. The org PR
   template carries them.
 - New inputs `builders`, `security_signers`, `cutover` (and CLI flags). `gate_ref` defaults to `sdlc-conformance-v3`.
-- Org caller template `workflow-templates/sdlc.yml` (adds the `review_requested` trigger) and a Dependabot config
-  template `templates/dependabot.yml` (npm, pip, GitHub Actions).
+- Org caller template `workflow-templates/sdlc.yml` (adds the `review_requested` trigger).
+- Marker comments and reviews edited by anyone but their author never count (GraphQL edit history; exit 2 if
+  unreadable). A sign-off counts only on the PR (naming the head SHA) or on a linked `tier:high` issue.
 - Pre-cutover PRs get exactly the v2 checks. v1 and v2 tags don't move.
 
 ## sdlc-conformance-v2 (2026-10-13)
