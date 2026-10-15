@@ -177,16 +177,20 @@ All of it skips PRs created before `cutover` (default `2026-10-16T00:00:00Z`). T
   - Only cross-repo issues linked and no `tier:*` on the PR: a violation. Add the label to the PR.
   - `tier:high` needs a comment carrying `<!-- sdlc:security-signoff v1 -->` from the first `security_signers`
     login (or a later one when the first one built it). It counts on a linked issue that itself carries
-    `tier:high`, or on the PR when the comment also names the full head SHA. Every linked `tier:high` issue
-    needs its own; a sign-off is never borrowed from another issue.
+    `tier:high` **and that this PR closes** (Closes/Fixes/Resolves, or GitHub's sidebar link), or on the PR when the
+    comment also names the full head SHA. Every closed `tier:high` issue needs its own. A `Part of` or mentioned
+    issue can raise the tier but never satisfy it: then only the PR sign-off with the head SHA works.
   - Neither the `Builder:` login nor the PR author can sign off. No `security_signers` set means high always fails.
-- **`builder-of-record`:** a `Builder: @login` line in the body (comments and code fences don't count). The login
+- **`builder-of-record`:** a `Builder: @login` line in the body (comments, code fences and `>` quotes don't count).
+  When the body has a `## Builder` section, only lines under it count. More than one distinct login fails. The login
   must be a real GitHub user account, not a bot, and on `builders`. With no `builders` set, that last part is a note.
   Bot and swarm PRs need the line too. Dependabot gets a note.
 - **`self-review`:** a comment by the builder with `<!-- sdlc:self-review v1 -->` and the full 40-character head
   SHA, or a review by the builder carrying the marker on the head commit. A push makes it stale. `/closer` posts
   the marker and requests a reviewer (through `/sdlc-handoff`, being added in napticstack-skills 0.88.0).
-- **Marker format.** The marker starts its own line, outside code fences, indented code and `>` quotes. For the
+- **Marker format.** The marker starts a line at column 0, outside code fences (list-nested too), indented code,
+  `>` quotes and any open HTML element (`<details>`, `<pre>`, `<blockquote>`...). Other HTML comments are ignored,
+  and a comment that carries the handoff marker (`<!-- sdlc:handoff v1`) never counts as a marker comment. For the
   self-review comment and a PR-level sign-off, the full 40-character head SHA sits on the marker line or the very
   next line:
 

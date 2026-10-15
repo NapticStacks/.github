@@ -1317,9 +1317,9 @@ def test_v1_readiness_uses_the_v1_template_after_cutover():
 
 class GraphTransport(FakeTransport):
     """FakeTransport plus GraphQL POSTs. `graph` maps node id -> edit info, or is an int status to raise."""
-    def __init__(self, routes, graph=None):
+    def __init__(self, routes, graph=None, closing=()):
         super().__init__(routes)
-        self.graph, self.queries = graph if graph is not None else {}, []
+        self.graph, self.queries, self.closing = graph if graph is not None else {}, [], list(closing)
 
     def __call__(self, url, headers, data=None):
         if data is None:
@@ -1329,6 +1329,10 @@ class GraphTransport(FakeTransport):
         self.queries.append(q)
         if isinstance(self.graph, int):
             raise sc.ApiError(self.graph, url)
+        if "closingIssuesReferences" in q["query"]:
+            nodes = [{"number": n, "repository": {"nameWithOwner": r}} for r, n in self.closing]
+            return {"data": {"repository": {"pullRequest": {"closingIssuesReferences": {
+                "totalCount": len(nodes), "nodes": nodes}}}}}
         ids = q["variables"]["ids"]
         return {"data": {"nodes": [self.graph.get(i) for i in ids]}}
 
@@ -1410,7 +1414,7 @@ def test_v1_no_marker_comments_means_no_graphql_call():
     plain = {"user": {"login": "x"}, "body": "hi", "node_id": "IC_x"}
     transport = GraphTransport(v1_routes({"body": "Closes #7\nBuilder: @example-dev"}, comments=[plain]))
     sc.gather(sc.Api("t0ken", transport), REPO, 42)
-    assert transport.queries == []
+    assert not [q for q in transport.queries if "ids" in q["variables"]]  # no edit-history read
 
 
 def test_v1_gather_fetches_each_linked_issue_once_and_main_reuses_it(monkeypatch):
@@ -1504,7 +1508,7 @@ def test_v1_caller_template_pins_v3_and_reruns_on_v1_events():
 # --- codex round 2: every high issue signed; markers outside fences and quotes ---------------
 
 def _two_high(sign7, sign5):
-    body = v1_ctx()["pr"]["body"].replace("Closes #7\n", "Closes #7\nPart of #5\n")
+    body = v1_ctx()["pr"]["body"].replace("Closes #7\n", "Closes #7\nCloses #5\n")
     return v1_ctx(labels=(), body=body, issues={
         7: {"labels": ["tier:high"], "comments": [signoff()] if sign7 else []},
         5: {"labels": ["tier:high"], "comments": [signoff()] if sign5 else []}})
@@ -1565,3 +1569,109 @@ def test_r2_issue_signoff_needs_no_sha_but_must_be_outside_fences():
 def test_r2_indented_code_block_marker_does_not_count():
     rv = self_review(body=f"Example:\n\n    {sc.SELF_REVIEW_MARKER} {HEAD}\n")
     assert "self-review" in checks(v1run(v1_ctx(comments=[rv])), sc.VIOLATION)
+
+
+# --- codex round 3: closing refs only; HTML-masked markers; Builder section -----------------
+
+def test_r3_part_of_issue_raises_tier_but_cannot_satisfy_signoff():
+    body = v1_ctx()["pr"]["body"].replace("Closes #7\n", "Closes #7\nPart of #5\n")
+    ctx = v1_ctx(labels=(), body=body, issues={7: {"labels": [], "comments": []},
+                                               5: {"labels": ["tier:high"], "comments": [signoff()]}})
+    [f] = [f for f in v1run(ctx) if f.check == "tier"]
+    assert f.level == sc.VIOLATION
+    ctx["comments"].append(signoff(sha=HEAD))  # only a head-bound PR sign-off satisfies it
+    assert v1run(ctx) == []
+
+
+def test_r3_closing_issue_signed_and_part_of_issue_high_still_fails():
+    body = v1_ctx()["pr"]["body"].replace("Closes #7\n", "Closes #7\nPart of #5\n")
+    ctx = v1_ctx(labels=(), body=body, issues={7: {"labels": ["tier:high"], "comments": [signoff()]},
+                                               5: {"labels": ["tier:high"], "comments": [signoff()]}})
+    assert "tier" in checks(v1run(ctx), sc.VIOLATION)
+
+
+def test_r3_github_closing_reference_counts_as_closing():
+    body = v1_ctx()["pr"]["body"].replace("Closes #7\n", "Part of #7\n")
+    ctx = v1_ctx(labels=(), body=body, issues={7: {"labels": ["tier:high"], "comments": [signoff()]}})
+    assert "tier" in checks(v1run(ctx), sc.VIOLATION)
+    ctx["closing_issues"] = [7]  # linked in the sidebar: GitHub's closingIssuesReferences
+    assert v1run(ctx) == []
+
+
+def test_r3_closing_refs_parse():
+    body = "Closes #7\nPart of #5\nfixes NapticStacks/example#9\nResolves https://github.com/NapticStacks/example/issues/11"
+    assert sc.closing_refs(body, REPO) == {7, 9, 11}
+
+
+def test_r3_gather_reads_closing_issue_references():
+    transport = GraphTransport(v1_routes({"body": "Part of #7\nBuilder: @example-dev"}, issue_labels=["tier:high"]),
+                               closing=[("NapticStacks/example", 7), ("NapticStacks/other", 3)])
+    ctx = sc.gather(sc.Api("t0ken", transport), REPO, 42)
+    assert ctx["closing_issues"] == [7]
+
+
+def test_r3_closing_references_read_failure_is_a_checker_error():
+    transport = GraphTransport(v1_routes({"body": "Closes #7\nBuilder: @example-dev"}), graph=502)
+    with pytest.raises(sc.CheckerError):
+        sc.gather(sc.Api("t0ken", transport), REPO, 42)
+
+
+M, S = sc.SELF_REVIEW_MARKER, HEAD
+
+
+@pytest.mark.parametrize("body", [
+    f"<blockquote>\n{M} {S}\n</blockquote>",
+    f"<pre>\n{M} {S}\n</pre>",
+    f"<details><summary>example</summary>\n\n{M} {S}\n\n</details>",
+    f"<code>\n{M} {S}\n</code>",
+    f"<div>\n{M} {S}",                                                   # never closed: masked to the end
+    f"<!-- sdlc:handoff v1 -->\n{M} {S}\n",                               # a handoff comment is never a marker
+    f"<!-- sdlc:handoff v1 {{\"note\": \"\n{M} {S}\n\"}} -->",            # marker text inside another comment
+    f"- example:\n  ```\n{M} {S}\n  ```",                                # list-nested fence
+    f"1. example:\n   ~~~\n{M} {S}\n   ~~~",
+    f" {M} {S}",                                                          # not at column 0
+])
+def test_r3_masked_markers_do_not_count(body):
+    assert sc.has_marker(body, M, HEAD) is False
+    assert "self-review" in checks(v1run(v1_ctx(comments=[self_review(body=body)])), sc.VIOLATION)
+
+
+@pytest.mark.parametrize("body", [
+    f"{M} {S}",
+    f"Self-review done. <code>ok</code>\n{M}\n{S}",
+    f"<details><summary>notes</summary>\nx\n</details>\n\n{M} {S}",
+    f"See <https://example.com/x>.\n{M} {S}",
+    f"line<br>\n{M} {S}",
+])
+def test_r3_markers_after_closed_html_still_count(body):
+    assert sc.has_marker(body, M, HEAD) is True
+
+
+@pytest.mark.parametrize("line", ["> Builder: @example-dev", ">Builder: @example-dev"])
+def test_r3_quoted_builder_line_does_not_count(line):
+    assert sc.builder_of_record(line) is None
+
+
+def test_r3_builder_section_wins_over_lines_elsewhere():
+    body = "## Issue\nCloses #7\nBuilder: @someone-else\n\n## Builder\nBuilder: @example-dev\n\n## Tier\ntier:low\n"
+    assert sc.builder_of_record(body) == "example-dev"
+
+
+def test_r3_multiple_distinct_builders_is_a_violation():
+    body = _body_with_builder("Builder: @example-dev\nBuilder: @example-other")
+    assert sc.builder_of_record(body) is None
+    assert sc.builder_logins(body) == ["example-dev", "example-other"]
+    [f] = [f for f in v1run(v1_ctx(body=body)) if f.check == "builder-of-record"]
+    assert f.level == sc.VIOLATION and "more than one" in f.problem.lower()
+
+
+def test_r3_same_builder_twice_is_fine():
+    body = _body_with_builder("Builder: @example-dev\nBuilder: @Example-Dev")
+    assert sc.builder_of_record(body) == "example-dev"
+
+
+def test_r3_no_ambiguous_builder_can_sign_off():
+    """With two Builder logins, neither may sign off (both are in the builder set)."""
+    body = _body_with_builder(f"Builder: @example-dev\nBuilder: @{SIGNER}")
+    ctx = v1_ctx(labels=("tier:high",), body=body, issues={7: {"labels": ["tier:high"], "comments": [signoff()]}})
+    assert "tier" in checks(v1run(ctx), sc.VIOLATION)

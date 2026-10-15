@@ -74,7 +74,7 @@ NA_RE = re.compile(r"^n/?a\b", re.I)
 NA_REASON_RE = re.compile(r"^n/?a\s*(?::|because\b)\s*\S", re.I)
 NA_DOCS_ONLY_RE = re.compile(r"^n/?a\s*:\s*docs[- ]only", re.I)
 REF_RE = re.compile(
-    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|part of)\s*:?\s+"
+    r"\b(?P<kw>close[sd]?|fix(?:e[sd])?|resolve[sd]?|part of)\s*:?\s+"
     r"(?:https://github\.com/(?P<uo>[\w.-]+)/(?P<ur>[\w.-]+)/issues/(?P<un>\d+)"
     r"|(?:(?P<o>[\w.-]+)/(?P<r>[\w.-]+))?#(?P<n>\d+))(?![\w/])", re.I)
 FENCE_LINE_RE = re.compile(r"^(?:\s*>)*\s*(`{3,}|~{3,})(.*)$")  # blockquote/list-nested fences too
@@ -98,7 +98,7 @@ MARKER_STATES = ("APPROVED", "COMMENTED", "CHANGES_REQUESTED")
 CUTOVER = "2026-10-16T00:00:00Z"
 TIERS = ("low", "medium", "high")
 TIER_LABEL_RE = re.compile(r"^tier:(low|medium|high)$", re.I)
-BUILDER_RE = re.compile(r"^[ \t>*-]*(?:\*\*)?builder(?:\*\*)?[ \t]*:(?:\*\*)?[ \t]*@?(app/[\w-]+|[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\[bot\])?)(?=[ \t]|$)",
+BUILDER_RE = re.compile(r"^[ \t*-]*(?:\*\*)?builder(?:\*\*)?[ \t]*:(?:\*\*)?[ \t]*@?(app/[\w-]+|[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\[bot\])?)(?=[ \t]|$)",
                         re.I | re.M)
 BUILDER_PLACEHOLDERS = {"na", "n-a", "none", "tbd", "tba", "todo", "unknown", "nobody", "swarm"}
 SELF_REVIEW_MARKER = "<!-- sdlc:self-review v1 -->"
@@ -263,12 +263,36 @@ def prose(body: str | None) -> str:
     return "\n".join(l for l, fenced in zip(lines, fence_mask(lines)) if not fenced)
 
 
+def builder_logins(body: str | None) -> list[str]:
+    """Distinct logins (lowercased, in order) on `Builder:` lines outside comments, fences and quotes.
+    When the body has a `## Builder` section, only lines under it count. Placeholders are skipped."""
+    found = sections(body)
+    text = found["builder"] if "builder" in found else body
+    out = []
+    for m in BUILDER_RE.finditer(prose(text)):
+        login = m.group(1).lower()
+        if login not in BUILDER_PLACEHOLDERS and login not in out:
+            out.append(login)
+    return out
+
+
 def builder_of_record(body: str | None) -> str | None:
-    """The login on the first `Builder:` line outside comments and fences, or None."""
-    m = BUILDER_RE.search(prose(body))
-    if not m or m.group(1).lower() in BUILDER_PLACEHOLDERS:
-        return None
-    return m.group(1)
+    """The one builder login, or None when there is none or more than one."""
+    logins = builder_logins(body)
+    return logins[0] if len(logins) == 1 else None
+
+
+def closing_refs(body: str | None, repo: str) -> set[int]:
+    """Same-repo issue numbers the body closes (Closes/Fixes/Resolves; never `Part of`)."""
+    owner, name = repo.lower().split("/")
+    out = set()
+    for m in REF_RE.finditer(prose(body)):
+        if m.group("kw").lower().startswith("part"):
+            continue
+        o, r = (m.group("uo"), m.group("ur")) if m.group("un") else (m.group("o"), m.group("r"))
+        if not o or (o.lower(), r.lower()) == (owner, name):
+            out.add(int(m.group("un") or m.group("n")))
+    return out
 
 
 def label_names(labels) -> list[str]:
@@ -287,21 +311,58 @@ def _login(item: dict) -> str:
 
 
 QUOTE_RE = re.compile(r"^\s*>|^(?: {4}|\t)")  # a `>` quote, or an indented code block
+HANDOFF_MARKER = "<!-- sdlc:handoff v1"
+MARKERS = (SELF_REVIEW_MARKER, SECURITY_SIGNOFF_MARKER)
+ANY_COMMENT_RE = re.compile(r"<!--.*?(?:-->|\Z)", re.S)
+# A fence opener even inside list items or quotes: `- ```py`, `1. ~~~`, `> ```.
+MARKER_FENCE_RE = re.compile(r"^[ \t>]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)*(`{3,}|~{3,})(.*)$")
+HTML_TAG_RE = re.compile(r"<(/?)([A-Za-z][A-Za-z0-9-]*)(?=[\s/>])[^>]*?(/?)>")
+VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
+             "source", "track", "wbr"}
+
+
+def _marker_mask(lines: list[str]) -> list[bool]:
+    """True for each line inside a fence (list- and quote-nested too), an open HTML element,
+    a `>` quote or an indented code block. Fails closed: an unclosed fence or tag masks the rest."""
+    out, fence, depth = [], None, 0
+    for line in lines:
+        m = MARKER_FENCE_RE.match(line)
+        if fence is not None:
+            out.append(True)
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not m.group(2).strip():
+                fence = None
+            continue
+        if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+            fence = m.group(1)
+            out.append(True)
+            continue
+        out.append(depth > 0 or bool(QUOTE_RE.match(line)))
+        for close, tag, selfclose in HTML_TAG_RE.findall(line):
+            if tag.lower() in VOID_TAGS or selfclose:
+                continue
+            depth = max(depth - 1, 0) if close else depth + 1
+    return out
 
 
 def has_marker(body: str | None, marker: str, head: str | None = None) -> bool:
-    """True when a line starts with `marker` outside code fences, indented code and `>` quotes. With `head`, the
-    full head SHA must also sit on that line or on the very next one (itself outside fences and quotes).
+    """True when a line starts at column 0 with `marker`, outside code fences (list-nested too), indented
+    code, `>` quotes and any open HTML element. Every other HTML comment is blanked first, and a comment
+    holding the handoff marker never counts. With `head`, the full head SHA must also sit on the marker line
+    or on the very next one (itself unmasked).
 
     Accepted:  `<!-- sdlc:self-review v1 --> <40-char sha>`  or the marker, then the SHA on the next line."""
-    lines = (body or "").splitlines()
-    hidden = [f or bool(QUOTE_RE.match(l)) for l, f in zip(lines, fence_mask(lines))]
+    text = body or ""
+    if HANDOFF_MARKER in text:
+        return False
+    text = ANY_COMMENT_RE.sub(lambda m: m.group(0) if m.group(0) in MARKERS else "\n" * m.group(0).count("\n"), text)
+    lines = text.splitlines()
+    hidden = _marker_mask(lines)
     for i, line in enumerate(lines):
-        if hidden[i] or not line.strip().startswith(marker):
+        if hidden[i] or not line.startswith(marker):
             continue
         if head is None:
             return True
-        near = [line.strip()[len(marker):]]
+        near = [line[len(marker):]]
         if i + 1 < len(lines) and not hidden[i + 1]:
             near.append(lines[i + 1])
         if any(head in SHA_RE.findall(t) for t in near):
@@ -475,7 +536,7 @@ def check_options(repo, pr, files, opts, read_file, present=None) -> list[Findin
     return out
 
 
-def check_tier(repo, pr, ctx, opts, builder) -> list[Finding]:
+def check_tier(repo, pr, ctx, opts, builders) -> list[Finding]:
     n = pr["number"]
     label = f"gh pr edit {n} -R {repo} --add-label tier:<low|medium|high>"
     linked = ctx.get("linked_issues") or {}
@@ -507,31 +568,39 @@ def check_tier(repo, pr, ctx, opts, builder) -> list[Finding]:
                         "Set `security_signers:` in the repo's .github/workflows/sdlc.yml (Security Ops first, then the backup).")]
     # The first signer signs; a later one only when the first one built it. Nobody signs off their own work:
     # neither the Builder line nor the PR author.
-    b = (builder or "").lower()
-    author = _login(pr)
-    allowed = {signers[0]} if signers[0] != b else set(signers[1:])
-    allowed -= {b, author}
+    excluded = {b.lower() for b in builders} | {_login(pr)}
+    allowed = {signers[0]} if signers[0] not in excluded else set(signers[1:])
+    allowed -= excluded
     head = pr["head"]["sha"]
 
     def signs(c, need_sha):
         return (_login(c) in allowed and trusted_marker(c)
                 and has_marker(c.get("body"), SECURITY_SIGNOFF_MARKER, head if need_sha else None))
-    # A head-SHA-bound sign-off on the PR covers it all. Otherwise EVERY linked tier:high issue needs its own
-    # sign-off: linking an unrelated, already-signed issue never borrows its sign-off.
-    high_issues = [i for i in issues.values() if effective_tier(i.get("labels")) == "high"]
-    if any(signs(c, True) for c in ctx.get("comments") or []) or (
-            high_issues and all(any(signs(c, False) for c in i.get("comments") or []) for i in high_issues)):
+    # A head-SHA-bound sign-off on the PR covers it all. Otherwise the high tier must come only from issues
+    # this PR closes, and EVERY closed tier:high issue needs its own sign-off. A `Part of` or mention-linked
+    # issue can raise the tier but never satisfy it: that sign-off was given for other work.
+    if any(signs(c, True) for c in ctx.get("comments") or []):
+        return []
+    closing = closing_refs(pr.get("body"), repo) | set(ctx.get("closing_issues") or [])
+    high = {k for k, i in issues.items() if effective_tier(i.get("labels")) == "high"}
+    if high and high <= closing and all(any(signs(c, False) for c in issues[k].get("comments") or []) for k in high):
         return []
     who = ", ".join(sorted(allowed)) or "nobody (every signer built or authored this PR)"
     return [Finding("tier", VIOLATION, "tier:high without a security sign-off.",
-                    f"High tier needs a comment with `{SECURITY_SIGNOFF_MARKER}` from: {who}. It counts on the "
-                    f"tier:high issue, or on this PR when it names the head SHA {head[:7]}.",
+                    f"High tier needs a comment with `{SECURITY_SIGNOFF_MARKER}` from: {who}. It counts on each "
+                    f"tier:high issue this PR closes, or on this PR when it names the head SHA {head[:7]}. "
+                    "When the high tier comes from a `Part of` issue, only the PR sign-off works.",
                     "Ask Security Ops to review the plan and post the sign-off comment on the issue, then re-run the check.")]
 
 
 def check_builder(repo, pr, ctx, opts, builder, kind) -> list[Finding]:
     n = pr["number"]
     fix = f"Add `Builder: @<your login>` under the PR body's ## Builder section: gh pr edit {n} -R {repo} --body-file <file>"
+    logins = builder_logins(pr.get("body"))
+    if len(logins) > 1:
+        return [Finding("builder-of-record", VIOLATION, f"More than one Builder login: {', '.join(logins)}.",
+                        "One human answers for the change. Every login named is in the builder set.",
+                        f"Keep one `Builder:` line under ## Builder: gh pr edit {n} -R {repo} --body-file <file>")]
     level = NOTE if kind == "Dependabot" else VIOLATION
     if builder is None:
         cause = ("Dependabot can't carry a Builder line; whoever approves the bump answers for it."
@@ -592,7 +661,7 @@ def check_self_review(repo, pr, ctx, builder, kind) -> list[Finding]:
 
 def check_v1(repo, pr, ctx, opts, kind) -> list[Finding]:
     builder = builder_of_record(pr.get("body"))
-    return (check_tier(repo, pr, ctx, opts, builder)
+    return (check_tier(repo, pr, ctx, opts, builder_logins(pr.get("body")))
             + check_builder(repo, pr, ctx, opts, builder, kind)
             + check_self_review(repo, pr, ctx, builder, kind))
 
@@ -835,6 +904,24 @@ def gather(api: Api, repo: str, number: int, cutover: str = CUTOVER, v1_reads: b
     return ctx
 
 
+CLOSING_QUERY = """query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+    closingIssuesReferences(first: 100) { totalCount nodes { number repository { nameWithOwner } } } } } }"""
+
+
+def closing_issue_numbers(api: Api, repo: str, number: int) -> list[int]:
+    """Same-repo issues GitHub says this PR closes (keywords or the sidebar link). Exit 2 on failure."""
+    owner, name = repo.split("/")
+    resp = api.post("/graphql", {"query": CLOSING_QUERY,
+                                 "variables": {"owner": owner, "name": name, "number": number}}) or {}
+    refs = None if resp.get("errors") else (((resp.get("data") or {}).get("repository") or {})
+                                             .get("pullRequest") or {}).get("closingIssuesReferences")
+    if refs is None or (refs.get("totalCount") or 0) > len(refs.get("nodes") or []):
+        raise CheckerError(f"could not read the PR's closing issue references: {resp.get('errors') or 'no data'}")
+    return sorted({n["number"] for n in refs["nodes"]
+                   if ((n.get("repository") or {}).get("nameWithOwner") or "").lower() == repo.lower()})
+
+
 EDIT_QUERY = """query($ids: [ID!]!) { nodes(ids: $ids) { ... on Comment {
   author { login } lastEditedAt editor { login }
   userContentEdits(first: 100) { totalCount nodes { editor { login } } } } } }"""
@@ -881,6 +968,19 @@ def gather_v1(api: Api, ctx: dict) -> None:
             issues[n] = None
         elif "pull_request" not in raw[n]:
             issues[n] = {"labels": label_names(raw[n].get("labels")), "comments": []}
+    ctx["closing_issues"] = closing_issue_numbers(api, repo, pr["number"])
+    for n in ctx["closing_issues"]:  # a sidebar-linked issue the body never names
+        if n not in raw:
+            try:
+                raw[n] = api.get(f"/repos/{repo}/issues/{n}")
+            except ApiError as e:
+                if e.status != 404:
+                    raise
+                raw[n] = None
+            if raw[n] is None:
+                issues[n] = None
+            elif "pull_request" not in raw[n]:
+                issues[n] = {"labels": label_names(raw[n].get("labels")), "comments": []}
     ctx["issue_cache"] = raw
     ctx["linked_issues"] = issues
     for n, issue in issues.items():
