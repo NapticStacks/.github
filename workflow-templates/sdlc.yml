@@ -1,0 +1,39 @@
+# SDLC conformance gate (Agentic SDLC V1, data v3). Checks each PR against
+# REVIEW.md's definition of done (NapticStacks/project-manager) and the V1
+# checks: tier, builder-of-record and self-review.
+# Gate code: NapticStacks/.github (reusable-sdlc-conformance.yml).
+# Docs: https://github.com/NapticStacks/naptic-sdlc/blob/main/docs/gates.md
+# Local pre-push check (from a NapticStacks/.github clone):
+#   python scripts/sdlc_conformance.py --pr <owner/repo#N>
+#
+# Fill in `builders` (the engineer roster) and `security_signers` (Security Ops
+# first, then the backup) from napticstack-skills config/shared/approvers.json.
+# Keep them in this private repo, never in NapticStacks/.github (it is public).
+# Add a second login to trusted_reviewers so nobody is the only reviewer.
+name: sdlc
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled, review_requested]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+  statuses: write
+
+concurrency:
+  group: sdlc-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  sdlc:
+    uses: NapticStacks/.github/.github/workflows/reusable-sdlc-conformance.yml@sdlc-conformance-v3
+    with:
+      mode: warn
+      trusted_reviewers: "maydaycyber"
+      builders: ""
+      security_signers: ""
+      # cutover: "2026-10-16T00:00:00Z"  # set per repo at adoption: PRs opened before it skip the V1 checks
