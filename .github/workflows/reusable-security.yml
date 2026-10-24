@@ -13,6 +13,10 @@
 #
 # All `uses:` are pinned to immutable commit SHAs. Bump only via a reviewed PR.
 #
+# The Secrets job also runs the inventor-notebook guard (scripts/notebook_guard.py,
+# pinned by `notebook_guard_ref`): the folders in `notebook_folders` (default
+# JORDAN-CONFIDENTIAL, always included) can't be merged. See project-manager#311.
+#
 # gitleaks scans FULL HISTORY on every event, pull_request included. It used to
 # scan only the PR diff on pull_request, which made the gate asymmetric: a
 # finding baked into an old commit passed every PR and then failed every merge
@@ -40,6 +44,14 @@ on:
         description: "Comma-separated paths checkov should skip (repeatable via newline)."
         type: string
         default: "node_modules"
+      notebook_guard_ref:
+        description: "Tag or SHA of NapticStacks/.github whose scripts/notebook_guard.py runs (project-manager#311)."
+        type: string
+        default: "notebook-guard-v1"
+      notebook_folders:
+        description: "Extra notebook folder names to block (comma-separated, any depth, any case). JORDAN-CONFIDENTIAL is always blocked."
+        type: string
+        default: "JORDAN-CONFIDENTIAL"
 
 permissions:
   contents: read
@@ -52,7 +64,36 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           fetch-depth: 0  # full history for push/cron full scan
+      # Inventor-notebook guard (project-manager#311). Lives in this required job so
+      # it blocks merge: no commit in the change (merge commits included) may add,
+      # edit, copy or rename a file into a notebook folder (`notebook_folders`,
+      # default JORDAN-CONFIDENTIAL). Untracking passes. A repo that still tracks
+      # the folder from before only gets a warning. History before the change is
+      # never checked: old commits stay as the notebook's timestamp evidence.
+      - name: Validate notebook_guard_ref
+        env:
+          REF: ${{ inputs.notebook_guard_ref }}
+        run: |
+          if ! [[ "$REF" =~ ^notebook-guard-v[0-9]+$ || "$REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::notebook_guard_ref must be a notebook-guard-vN tag or a 40-char SHA, got: $REF"
+            exit 2
+          fi
+      - name: Check out the notebook guard
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          repository: NapticStacks/.github
+          ref: ${{ inputs.notebook_guard_ref }}
+          path: .notebook-guard
+          persist-credentials: false
+      - name: Notebook guard (inventor notebooks stay local)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before || '' }}
+          FOLDERS: ${{ inputs.notebook_folders }}
+          # On a PR or merge queue the base must be in the clone; on push a force-push may drop it.
+          STRICT: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && '--strict-base' || '' }}
+        run: python3 .notebook-guard/scripts/notebook_guard.py --repo . --base "$BASE_SHA" --head HEAD --folders "$FOLDERS" $STRICT
       - name: Install gitleaks CLI (OSS, pinned sha256)
+        if: success() || failure()
         env:
           GITLEAKS_VERSION: "8.30.1"
           GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
@@ -69,6 +110,7 @@ jobs:
       # commit passed every PR and failed every merge — a red default branch no
       # future commit could turn green. See the header note.
       - name: Run gitleaks (full history)
+        if: success() || failure()
         run: |
           gitleaks detect --source . \
             --redact --verbose --no-banner --report-format sarif --report-path gitleaks.sarif
