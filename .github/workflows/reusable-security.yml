@@ -14,8 +14,8 @@
 # All `uses:` are pinned to immutable commit SHAs. Bump only via a reviewed PR.
 #
 # The Secrets job also runs the inventor-notebook guard (scripts/notebook_guard.py,
-# pinned by the `notebook_guard_ref` input): JORDAN-CONFIDENTIAL/ never lands on a
-# remote. See project-manager#311.
+# pinned by `notebook_guard_ref`): the folders in `notebook_folders` (default
+# JORDAN-CONFIDENTIAL) never land on a remote. See project-manager#311.
 #
 # gitleaks scans FULL HISTORY on every event, pull_request included. It used to
 # scan only the PR diff on pull_request, which made the gate asymmetric: a
@@ -48,6 +48,10 @@ on:
         description: "Tag or SHA of NapticStacks/.github whose scripts/notebook_guard.py runs (project-manager#311)."
         type: string
         default: "notebook-guard-v1"
+      notebook_folders:
+        description: "Comma-separated notebook folder names the guard blocks (any depth, any case)."
+        type: string
+        default: "JORDAN-CONFIDENTIAL"
 
 permissions:
   contents: read
@@ -61,10 +65,11 @@ jobs:
         with:
           fetch-depth: 0  # full history for push/cron full scan
       # Inventor-notebook guard (project-manager#311). Lives in this required job so
-      # it blocks merge: a change may not add, edit or rename a file into a
-      # JORDAN-CONFIDENTIAL/ folder. Untracking one passes. A repo that still tracks
-      # the folder from before only gets a warning. History is never checked: old
-      # commits stay as the notebook's timestamp evidence.
+      # it blocks merge: no commit in the change (merge commits included) may add,
+      # edit, copy or rename a file into a notebook folder (`notebook_folders`,
+      # default JORDAN-CONFIDENTIAL). Untracking passes. A repo that still tracks
+      # the folder from before only gets a warning. History before the change is
+      # never checked: old commits stay as the notebook's timestamp evidence.
       - name: Validate notebook_guard_ref
         env:
           REF: ${{ inputs.notebook_guard_ref }}
@@ -80,10 +85,13 @@ jobs:
           ref: ${{ inputs.notebook_guard_ref }}
           path: .notebook-guard
           persist-credentials: false
-      - name: Notebook guard (JORDAN-CONFIDENTIAL stays local)
+      - name: Notebook guard (inventor notebooks stay local)
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before || '' }}
-        run: python3 .notebook-guard/scripts/notebook_guard.py --repo . --base "$BASE_SHA" --head HEAD
+          FOLDERS: ${{ inputs.notebook_folders }}
+          # On a PR or merge queue the base must be in the clone; on push a force-push may drop it.
+          STRICT: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && '--strict-base' || '' }}
+        run: python3 .notebook-guard/scripts/notebook_guard.py --repo . --base "$BASE_SHA" --head HEAD --folders "$FOLDERS" $STRICT
       - name: Install gitleaks CLI (OSS, pinned sha256)
         if: success() || failure()
         env:

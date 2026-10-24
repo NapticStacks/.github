@@ -45,6 +45,11 @@ def test_is_notebook_path_matches_any_component_case_insensitive():
     assert not ng.is_notebook_path("src/confidential/x.py")
 
 
+def test_default_scope_is_jordans_folder_only():
+    assert not ng.is_notebook_path("BEN-CONFIDENTIAL/log.md")
+    assert ng.is_notebook_path("BEN-CONFIDENTIAL/log.md", ng.parse_folders("JORDAN-CONFIDENTIAL, BEN-CONFIDENTIAL"))
+
+
 def test_adding_a_notebook_file_fails(repo: Path):
     base = git(repo, "rev-parse", "HEAD")
     write(repo, "JORDAN-CONFIDENTIAL/INVENTOR_NOTEBOOK_PROMPT_LOG.md")
@@ -133,11 +138,33 @@ def test_add_then_delete_inside_the_range_fails(repo: Path):
     assert ng.check(str(repo), base, head).violations == ["JORDAN-CONFIDENTIAL/log.md"]
 
 
-def test_other_owners_notebook_folder_is_caught(repo: Path):
+def test_other_folders_only_when_listed(repo: Path):
     base = git(repo, "rev-parse", "HEAD")
     write(repo, "BEN-CONFIDENTIAL/INVENTOR_NOTEBOOK_PROMPT_LOG.md")
-    head = commit(repo, "leak")
-    assert ng.check(str(repo), base, head).violations == ["BEN-CONFIDENTIAL/INVENTOR_NOTEBOOK_PROMPT_LOG.md"]
+    head = commit(repo, "ben's notebook")
+    assert ng.check(str(repo), base, head).violations == []
+    both = ng.parse_folders("JORDAN-CONFIDENTIAL,BEN-CONFIDENTIAL")
+    assert ng.check(str(repo), base, head, both).violations == ["BEN-CONFIDENTIAL/INVENTOR_NOTEBOOK_PROMPT_LOG.md"]
+
+
+def test_notebook_added_in_a_merge_commit_fails(repo: Path):
+    base = git(repo, "rev-parse", "HEAD")
+    default = git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+    git(repo, "checkout", "-q", "-b", "side")
+    write(repo, "side.md")
+    commit(repo, "side work")
+    git(repo, "checkout", "-q", default)
+    write(repo, "main.md")
+    commit(repo, "main work")
+    git(repo, "merge", "-q", "--no-commit", "--no-ff", "side")
+    write(repo, "JORDAN-CONFIDENTIAL/log.md")
+    head = commit(repo, "merge, with git add -A")
+    assert ng.check(str(repo), base, head).violations == ["JORDAN-CONFIDENTIAL/log.md"]
+
+
+def test_missing_base_fails_when_strict(repo: Path, capsys):
+    head = git(repo, "rev-parse", "HEAD")
+    assert ng.main(["--repo", str(repo), "--base", "1" * 40, "--head", head, "--strict-base"]) == 2
 
 
 def test_missing_base_after_force_push_warns_and_checks_tree(repo: Path, capsys):
