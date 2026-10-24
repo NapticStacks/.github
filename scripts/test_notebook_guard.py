@@ -162,7 +162,7 @@ def test_notebook_added_in_a_merge_commit_fails(repo: Path):
     assert ng.check(str(repo), base, head).violations == ["JORDAN-CONFIDENTIAL/log.md"]
 
 
-def test_missing_base_fails_when_strict(repo: Path, capsys):
+def test_missing_base_fails_when_strict(repo: Path):
     head = git(repo, "rev-parse", "HEAD")
     assert ng.main(["--repo", str(repo), "--base", "1" * 40, "--head", head, "--strict-base"]) == 2
 
@@ -175,3 +175,38 @@ def test_missing_base_after_force_push_warns_and_checks_tree(repo: Path, capsys)
 
 def test_error_lines_escape_workflow_command_characters():
     assert ng.escape_property("a:b,c%d\ne") == "a%3Ab%2Cc%25d%0Ae"
+
+
+def test_merge_adds_then_later_commit_deletes_fails(repo: Path):
+    base = git(repo, "rev-parse", "HEAD")
+    default = git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+    git(repo, "checkout", "-q", "-b", "side")
+    write(repo, "side.md")
+    commit(repo, "side work")
+    git(repo, "checkout", "-q", default)
+    write(repo, "main.md")
+    commit(repo, "main work")
+    git(repo, "merge", "-q", "--no-commit", "--no-ff", "side")
+    write(repo, "JORDAN-CONFIDENTIAL/log.md")
+    commit(repo, "merge, with git add -A")
+    git(repo, "rm", "-q", "JORDAN-CONFIDENTIAL/log.md")
+    head = commit(repo, "remove it again")
+    assert ng.check(str(repo), base, head).violations == ["JORDAN-CONFIDENTIAL/log.md"]
+
+
+def test_force_push_that_drops_an_old_notebook_edit_passes(repo: Path):
+    write(repo, "JORDAN-CONFIDENTIAL/log.md", "a\n")
+    root = commit(repo, "old leak")
+    write(repo, "JORDAN-CONFIDENTIAL/log.md", "b\n")
+    before = commit(repo, "bad edit, later force-pushed away")
+    git(repo, "reset", "-q", "--hard", root)
+    write(repo, "src/app.py")
+    after = commit(repo, "the rewritten branch")
+    assert ng.check(str(repo), before, after).violations == []
+
+
+def test_jordans_folder_is_always_in_scope():
+    folders = ng.parse_folders("BEN-CONFIDENTIAL, /DARIEN-CONFIDENTIAL/")
+    assert ng.is_notebook_path("JORDAN-CONFIDENTIAL/log.md", folders)
+    assert ng.is_notebook_path("darien-confidential/log.md", folders)
+    assert ng.is_notebook_path("JORDAN-CONFIDENTIAL/log.md", ng.parse_folders(""))

@@ -5,14 +5,14 @@
 - `reusable-security.yml`: the required `Secrets (gitleaks)` job now runs `scripts/notebook_guard.py` first.
   Any commit in the change (merge commits included, via the net diff) that adds, edits, copies or renames a file into
   a notebook folder fails. Folders come from the new input `notebook_folders` (default `JORDAN-CONFIDENTIAL`, Jordan's
-  scope decision 2026-10-24; widen per repo when Ben or Darien opt in). Untracking passes. Paths are read with `-z`, so unusual names
+  scope decision 2026-10-24; a repo can add folders, e.g. `BEN-CONFIDENTIAL` when Ben opts in, but never drop Jordan's). Untracking passes. Paths are read with `-z`, so unusual names
   can't slip past. On push, a force-pushed `before` missing from the clone falls back to a tree check with a warning; on
   `pull_request` and `merge_group` a missing base is an error (exit 2).
   gitleaks still runs when the guard fails. `merge_group` uses its base SHA. `notebook_guard_ref` is validated.
   A repo that still tracks the folder from before gets a warning only. History is not checked, on purpose.
 - New input `notebook_guard_ref` (default `notebook-guard-v1`). Callers on `@v1` get the guard when `v1` moves.
-- Rollback: move `v1` back to `a67d6a0` (its target before this release).
-- Moving `v1` also brings `reusable-test-count-guard.yml` (new file, opt-in, no effect on existing callers).
+- Rollback: move `v1` back to `2720b68` (its target before this release, checked with `git ls-remote`).
+- Moving `v1` also brings `reusable-sdlc-conformance.yml` (no caller pins it to `@v1`; callers use the `sdlc-conformance-vN` tags) and doc and test changes.
 
 ## sdlc-conformance-v3 (unreleased; tag cut on merge)
 

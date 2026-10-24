@@ -15,7 +15,7 @@
 #
 # The Secrets job also runs the inventor-notebook guard (scripts/notebook_guard.py,
 # pinned by `notebook_guard_ref`): the folders in `notebook_folders` (default
-# JORDAN-CONFIDENTIAL) never land on a remote. See project-manager#311.
+# JORDAN-CONFIDENTIAL, always included) can't be merged. See project-manager#311.
 #
 # gitleaks scans FULL HISTORY on every event, pull_request included. It used to
 # scan only the PR diff on pull_request, which made the gate asymmetric: a
@@ -49,7 +49,7 @@ on:
         type: string
         default: "notebook-guard-v1"
       notebook_folders:
-        description: "Comma-separated notebook folder names the guard blocks (any depth, any case)."
+        description: "Extra notebook folder names to block (comma-separated, any depth, any case). JORDAN-CONFIDENTIAL is always blocked."
         type: string
         default: "JORDAN-CONFIDENTIAL"
 

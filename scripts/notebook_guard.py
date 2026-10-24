@@ -1,14 +1,14 @@
 """Inventor-notebook guard (NapticStacks/project-manager#311).
 
 An inventor notebook (`JORDAN-CONFIDENTIAL/` by default; more folders through
-`--folders`, e.g. `JORDAN-CONFIDENTIAL,BEN-CONFIDENTIAL`) is local-only: it is the dated record of human conception for any
+`--folders`, e.g. `BEN-CONFIDENTIAL`; Jordan's is always included) is local-only: it is the dated record of human conception for any
 future patent, and it must not land on a remote. This guard fails a change in
 which any commit adds, edits, copies or renames a file into such a folder,
 anywhere in the tree. A commit that only removes one (untracking it) passes.
 
-Every commit in the range is checked, plus the net diff (git log prints no paths
-for merge commits), so a file added and deleted again inside one PR fails, and so
-does one added while resolving a merge.
+Every commit in the range is checked, merge commits included (`--cc`), plus the
+net diff from the merge base. A file added and deleted again inside one PR fails,
+and so does one added while resolving a merge.
 
 A repo that still tracks the folder from before the guard only gets a warning,
 so unrelated work keeps moving while its untrack PR lands. History before the
@@ -31,7 +31,9 @@ ZERO = "0" * 40
 
 
 def parse_folders(spec: str) -> frozenset[str]:
-    return frozenset(f.strip().strip("/").lower() for f in spec.split(",") if f.strip())
+    """Folder names to block. Jordan's folder is always included: a repo can widen the scope, never narrow it."""
+    named = {f.strip().strip("/").lower() for f in spec.split(",") if f.strip().strip("/")}
+    return frozenset(named | {DEFAULT_FOLDERS.lower()})
 
 
 @dataclass
@@ -51,6 +53,11 @@ def escape_property(s: str) -> str:
     """Escape a value for a workflow-command property (file=...)."""
     return (s.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
             .replace(":", "%3A").replace(",", "%2C"))
+
+
+def escape_data(s: str) -> str:
+    """Escape a workflow-command message."""
+    return s.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
 
 def _git(repo: str, *args: str) -> str:
@@ -87,8 +94,10 @@ def _parse_name_status(out: str) -> list[str]:
 
 def _changed_paths(repo: str, base: str, head: str) -> list[str]:
     """Paths any commit in base..head adds, edits, copies or renames into place, plus the net diff."""
-    per_commit = _parse_name_status(_git(repo, "log", "-z", "-M", "--name-status", "--format=", f"{base}..{head}"))
-    net = _parse_name_status(_git(repo, "diff", "-z", "-M", "--name-status", base, head))
+    # --cc: without it git log prints no paths for merge commits.
+    per_commit = _parse_name_status(_git(repo, "log", "-z", "-M", "--cc", "--name-status", "--format=", f"{base}..{head}"))
+    # Three dots: diff from the merge base, so a force-push that drops an old edit isn't blamed on the new head.
+    net = _parse_name_status(_git(repo, "diff", "-z", "-M", "--name-status", f"{base}...{head}"))
     return per_commit + net
 
 
@@ -119,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         r = check(a.repo, a.base or None, a.head, parse_folders(a.folders))
     except subprocess.CalledProcessError as e:
-        print(f"::error::notebook guard could not read git: {(e.stderr or str(e)).strip()}")
+        print(f"::error::notebook guard could not read git: {escape_data((e.stderr or str(e)).strip())}")
         return 2
     if r.base_missing and a.strict_base:
         print("::error::Base commit is not in this clone, so the change can't be checked.")
@@ -127,7 +136,7 @@ def main(argv: list[str] | None = None) -> int:
     if r.base_missing:
         print("::warning::Base commit is not in this clone (force-push?). Checked the tree only.")
     for p in r.violations:
-        print(f"::error file={escape_property(p)}::A commit in this change adds or edits a local-only "
+        print(f"::error file={escape_property(p)}::A commit in this change adds, edits, copies or renames into a local-only "
               "inventor notebook. Remove it from the commits and keep the folder in .gitignore (project-manager#311).")
     if r.still_tracked:
         print(f"::warning::{len(r.still_tracked)} notebook file(s) are still tracked. "
