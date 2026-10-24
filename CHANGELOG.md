@@ -3,7 +3,7 @@
 ## notebook-guard-v1 (unreleased; tag cut on merge, then v1 moves)
 
 - `reusable-security.yml`: the required `Secrets (gitleaks)` job now runs `scripts/notebook_guard.py` first.
-  Any commit in the change (merge commits included, via the net diff) that adds, edits, copies or renames a file into
+  Any commit in the change (merge commits included, via `git log --cc` plus the net diff) that adds, edits, copies or renames a file into
   a notebook folder fails. Folders come from the new input `notebook_folders` (default `JORDAN-CONFIDENTIAL`, Jordan's
   scope decision 2026-10-24; a repo can add folders, e.g. `BEN-CONFIDENTIAL` when Ben opts in, but never drop Jordan's). Untracking passes. Paths are read with `-z`, so unusual names
   can't slip past. On push, a force-pushed `before` missing from the clone falls back to a tree check with a warning; on

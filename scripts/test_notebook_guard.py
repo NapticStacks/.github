@@ -210,3 +210,14 @@ def test_jordans_folder_is_always_in_scope():
     assert ng.is_notebook_path("JORDAN-CONFIDENTIAL/log.md", folders)
     assert ng.is_notebook_path("darien-confidential/log.md", folders)
     assert ng.is_notebook_path("JORDAN-CONFIDENTIAL/log.md", ng.parse_folders(""))
+
+
+def test_combined_rename_records_have_one_path():
+    # git log --cc -M prints a merge's combined rename as RM / MR / RR with ONE path.
+    out = "RM\0a.md\0A\0JORDAN-CONFIDENTIAL/x.md\0R100\0old.md\0new.md\0MM\0b.md\0"
+    assert ng._parse_name_status(out) == ["a.md", "JORDAN-CONFIDENTIAL/x.md", "new.md", "b.md"]
+
+
+def test_folder_entry_with_inner_slash_is_rejected():
+    with pytest.raises(ValueError):
+        ng.parse_folders("team/BEN-CONFIDENTIAL")

@@ -13,7 +13,7 @@ names in `project-manager` → `config/repo_review_policy.json` are
 
 | Context | Source | Gate? |
 |---|---|---|
-| `security / Secrets (gitleaks)` | reusable-security | HARD (required). Runs the inventor-notebook guard first (`scripts/notebook_guard.py`, input `notebook_guard_ref`, default `notebook-guard-v1`): a commit that adds or edits a file in a notebook folder (input `notebook_folders`, default `JORDAN-CONFIDENTIAL`) fails, untracking passes (project-manager#311). |
+| `security / Secrets (gitleaks)` | reusable-security | HARD (required). Runs the inventor-notebook guard first (`scripts/notebook_guard.py`, input `notebook_guard_ref`, default `notebook-guard-v1`): a commit that adds or edits a file in a notebook folder (`JORDAN-CONFIDENTIAL` always; input `notebook_folders` adds more, never removes it) fails, untracking passes (project-manager#311). |
 | `security / IaC (checkov)` | reusable-security | evidence (soft-fail) |
 | `security / Trivy` | reusable-security | evidence (soft-fail) |
 | `ci / lint` | reusable-ci-python/node | typically required |

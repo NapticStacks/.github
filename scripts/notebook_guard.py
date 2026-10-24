@@ -1,8 +1,8 @@
 """Inventor-notebook guard (NapticStacks/project-manager#311).
 
-An inventor notebook (`JORDAN-CONFIDENTIAL/` by default; more folders through
-`--folders`, e.g. `BEN-CONFIDENTIAL`; Jordan's is always included) is local-only: it is the dated record of human conception for any
-future patent, and it must not land on a remote. This guard fails a change in
+An inventor notebook (`JORDAN-CONFIDENTIAL/` always; more folders through
+`--folders`, e.g. `BEN-CONFIDENTIAL`) is local-only and must never be merged:
+it is the dated record of human conception for any future patent. This guard fails a change in
 which any commit adds, edits, copies or renames a file into such a folder,
 anywhere in the tree. A commit that only removes one (untracking it) passes.
 
@@ -15,7 +15,7 @@ so unrelated work keeps moving while its untrack PR lands. History before the
 range is never checked: old commits are kept on purpose as timestamp evidence.
 
 Exit codes: 0 pass (warnings allowed), 1 a change touches a notebook,
-2 the guard itself failed (git error).
+2 the guard itself failed (git error, a bad folder name, or a missing base with --strict-base).
 """
 
 from __future__ import annotations
@@ -33,6 +33,8 @@ ZERO = "0" * 40
 def parse_folders(spec: str) -> frozenset[str]:
     """Folder names to block. Jordan's folder is always included: a repo can widen the scope, never narrow it."""
     named = {f.strip().strip("/").lower() for f in spec.split(",") if f.strip().strip("/")}
+    if any("/" in f for f in named):
+        raise ValueError("a notebook folder is a single folder name, not a path")
     return frozenset(named | {DEFAULT_FOLDERS.lower()})
 
 
@@ -82,7 +84,7 @@ def _parse_name_status(out: str) -> list[str]:
         if not status:
             i += 1
             continue
-        if status[0] in "RC":  # rename or copy: old path, then new path
+        if status[0] in "RC" and status[1:].isdigit():  # R100 / C075: old path, then new path
             paths.append(fields[i + 2])
             i += 3
         else:
@@ -126,7 +128,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="a base missing from the clone is an error (pull_request, merge_group)")
     a = ap.parse_args(argv)
     try:
-        r = check(a.repo, a.base or None, a.head, parse_folders(a.folders))
+        folders = parse_folders(a.folders)
+    except ValueError as e:
+        print(f"::error::notebook guard: {e}")
+        return 2
+    try:
+        r = check(a.repo, a.base or None, a.head, folders)
     except subprocess.CalledProcessError as e:
         print(f"::error::notebook guard could not read git: {escape_data((e.stderr or str(e)).strip())}")
         return 2
@@ -137,7 +144,7 @@ def main(argv: list[str] | None = None) -> int:
         print("::warning::Base commit is not in this clone (force-push?). Checked the tree only.")
     for p in r.violations:
         print(f"::error file={escape_property(p)}::A commit in this change adds, edits, copies or renames into a local-only "
-              "inventor notebook. Remove it from the commits and keep the folder in .gitignore (project-manager#311).")
+              "inventor notebook. Remove it from the commits (and delete the pushed branch if it held the file) and keep the folder in .gitignore (project-manager#311).")
     if r.still_tracked:
         print(f"::warning::{len(r.still_tracked)} notebook file(s) are still tracked. "
               "Merge this repo's untrack PR (project-manager#311).")
