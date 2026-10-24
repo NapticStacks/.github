@@ -1,5 +1,13 @@
 # Changelog
 
+## notebook-guard-v1 (unreleased; tag cut on merge, then v1 moves)
+
+- `reusable-security.yml`: the required `Secrets (gitleaks)` job now runs `scripts/notebook_guard.py` first.
+  A change that adds, edits or renames a file into any `JORDAN-CONFIDENTIAL/` folder fails. Untracking passes.
+  A repo that still tracks the folder from before gets a warning only. History is not checked, on purpose.
+- New input `notebook_guard_ref` (default `notebook-guard-v1`). Callers on `@v1` get the guard when `v1` moves.
+- Moving `v1` also brings `reusable-test-count-guard.yml` (new file, opt-in, no effect on existing callers).
+
 ## sdlc-conformance-v3 (unreleased; tag cut on merge)
 
 - SDLC V1 checks, for PRs created at or after the cutover (`2026-10-16T00:00:00Z`, input `cutover`):

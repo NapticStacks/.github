@@ -46,4 +46,4 @@ jobs:
         run: npm install --no-audit --no-fund
       - name: pytest
         working-directory: scripts
-        run: python -m pytest test_test_count.py test_sdlc_conformance.py -q
+        run: python -m pytest test_test_count.py test_sdlc_conformance.py test_notebook_guard.py -q

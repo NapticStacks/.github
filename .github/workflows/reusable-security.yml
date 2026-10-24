@@ -13,6 +13,10 @@
 #
 # All `uses:` are pinned to immutable commit SHAs. Bump only via a reviewed PR.
 #
+# The Secrets job also runs the inventor-notebook guard (scripts/notebook_guard.py,
+# pinned by the `notebook_guard_ref` input): JORDAN-CONFIDENTIAL/ never lands on a
+# remote. See project-manager#311.
+#
 # gitleaks scans FULL HISTORY on every event, pull_request included. It used to
 # scan only the PR diff on pull_request, which made the gate asymmetric: a
 # finding baked into an old commit passed every PR and then failed every merge
@@ -40,6 +44,10 @@ on:
         description: "Comma-separated paths checkov should skip (repeatable via newline)."
         type: string
         default: "node_modules"
+      notebook_guard_ref:
+        description: "Tag or SHA of NapticStacks/.github whose scripts/notebook_guard.py runs (project-manager#311)."
+        type: string
+        default: "notebook-guard-v1"
 
 permissions:
   contents: read
@@ -52,6 +60,22 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           fetch-depth: 0  # full history for push/cron full scan
+      # Inventor-notebook guard (project-manager#311). Lives in this required job so
+      # it blocks merge: a change may not add, edit or rename a file into a
+      # JORDAN-CONFIDENTIAL/ folder. Untracking one passes. A repo that still tracks
+      # the folder from before only gets a warning. History is never checked: old
+      # commits stay as the notebook's timestamp evidence.
+      - name: Check out the notebook guard
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          repository: NapticStacks/.github
+          ref: ${{ inputs.notebook_guard_ref }}
+          path: .notebook-guard
+          persist-credentials: false
+      - name: Notebook guard (JORDAN-CONFIDENTIAL stays local)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || '' }}
+        run: python3 .notebook-guard/scripts/notebook_guard.py --repo . --base "$BASE_SHA" --head HEAD
       - name: Install gitleaks CLI (OSS, pinned sha256)
         env:
           GITLEAKS_VERSION: "8.30.1"
