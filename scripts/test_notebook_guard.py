@@ -114,3 +114,37 @@ def test_main_exit_codes(repo: Path, capsys):
     assert "::error file=JORDAN-CONFIDENTIAL/log.md" in out
     assert ng.main(["--repo", str(repo), "--base", head, "--head", head]) == 0
     assert "::warning" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("name", ["café.md", "tab\there.md", 'quote".md', "back\\slash.md"])
+def test_quoted_paths_are_still_caught(repo: Path, name: str):
+    base = git(repo, "rev-parse", "HEAD")
+    write(repo, f"JORDAN-CONFIDENTIAL/{name}")
+    head = commit(repo, "leak")
+    assert ng.check(str(repo), base, head).violations == [f"JORDAN-CONFIDENTIAL/{name}"]
+
+
+def test_add_then_delete_inside_the_range_fails(repo: Path):
+    base = git(repo, "rev-parse", "HEAD")
+    write(repo, "JORDAN-CONFIDENTIAL/log.md")
+    commit(repo, "leak")
+    git(repo, "rm", "-q", "JORDAN-CONFIDENTIAL/log.md")
+    head = commit(repo, "remove")
+    assert ng.check(str(repo), base, head).violations == ["JORDAN-CONFIDENTIAL/log.md"]
+
+
+def test_other_owners_notebook_folder_is_caught(repo: Path):
+    base = git(repo, "rev-parse", "HEAD")
+    write(repo, "BEN-CONFIDENTIAL/INVENTOR_NOTEBOOK_PROMPT_LOG.md")
+    head = commit(repo, "leak")
+    assert ng.check(str(repo), base, head).violations == ["BEN-CONFIDENTIAL/INVENTOR_NOTEBOOK_PROMPT_LOG.md"]
+
+
+def test_missing_base_after_force_push_warns_and_checks_tree(repo: Path, capsys):
+    head = git(repo, "rev-parse", "HEAD")
+    assert ng.main(["--repo", str(repo), "--base", "1" * 40, "--head", head]) == 0
+    assert "not in this clone" in capsys.readouterr().out
+
+
+def test_error_lines_escape_workflow_command_characters():
+    assert ng.escape_property("a:b,c%d\ne") == "a%3Ab%2Cc%25d%0Ae"
