@@ -105,6 +105,8 @@ AT_LOGIN_RE = re.compile(r"(?<![\w@.])@(app/[\w-]+|[A-Za-z0-9](?:[A-Za-z0-9-]*[A
 BUILDER_PLACEHOLDERS = {"na", "n-a", "none", "tbd", "tba", "todo", "unknown", "nobody", "swarm"}
 SELF_REVIEW_MARKER = "<!-- sdlc:self-review v1 -->"
 SECURITY_SIGNOFF_MARKER = "<!-- sdlc:security-signoff v1 -->"
+# The /cso evidence marker (NapticStacks/.github#15): lets the first security signer sign their own work.
+CSO_MARKER = "<!-- sdlc:cso v1 -->"
 SHA_RE = re.compile(r"(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])")
 
 
@@ -318,6 +320,8 @@ HANDOFF_MARKER = "<!-- sdlc:handoff v1"
 SHA40 = r"([0-9a-f]{40})"
 SELF_REVIEW_LINE_RE = re.compile(r"^" + re.escape(SELF_REVIEW_MARKER) + r"(?: " + SHA40 + r")?$")
 SIGNOFF_LINE_RE = re.compile(r"^" + re.escape(SECURITY_SIGNOFF_MARKER) + r"(?: " + SHA40 + r")?$")
+CSO_LINE_RE = re.compile(r"^" + re.escape(CSO_MARKER) + r" " + SHA40 + r"$")  # the SHA is required
+LINK_RE = re.compile(r"https?://\S+")
 
 
 def first_line_marker(body: str | None, line_re: re.Pattern) -> tuple[bool, str | None]:
@@ -532,32 +536,64 @@ def check_tier(repo, pr, ctx, opts, builders) -> list[Finding]:
         return [Finding("tier", VIOLATION, "tier:high without a security sign-off.",
                         "This caller sets no `security_signers`, so no sign-off can count. High tier fails closed.",
                         "Set `security_signers:` in the repo's .github/workflows/sdlc.yml (Security Ops first, then the backup).")]
-    # The first signer signs; a later one only when the first one built it. Nobody signs off their own work:
-    # neither the Builder line nor the PR author.
+    # The first signer signs; a later one only when the first one built it. Nobody signs off their own work
+    # (neither the Builder line nor the PR author), except the first signer when a /cso evidence marker sits in
+    # the same place as the sign-off (NapticStacks/.github#15).
     excluded = {b.lower() for b in builders} | {_login(pr)}
-    allowed = {signers[0]} if signers[0] not in excluded else set(signers[1:])
+    first = signers[0]
+    own = first if first in excluded else None
+    allowed = {first} if own is None else set(signers[1:])
     allowed -= excluded
     head = pr["head"]["sha"]
 
-    def signs(c, on_pr):
-        ok, sha = first_line_marker(c.get("body"), SIGNOFF_LINE_RE)
-        return (ok and _login(c) in allowed and trusted_marker(c)
-                and (sha == head if on_pr else True))
+    def cso_in(comments, on_pr):
+        """A /cso evidence marker: the exact first line `<!-- sdlc:cso v1 --> <sha>`, a link to the run or report
+        below it, by a security signer, edited by nobody else. On the PR the SHA must be the head, so a push
+        makes it stale; on an issue it is the plan or trunk SHA the review ran against."""
+        for c in comments:
+            ok, sha = first_line_marker(c.get("body"), CSO_LINE_RE)
+            rest = (c.get("body") or "").strip().split("\n", 1)[1:]
+            if (ok and _login(c) in signers and trusted_marker(c) and rest and LINK_RE.search(rest[0])
+                    and (sha == head if on_pr else True)):
+                return True
+        return False
+
+    def signed(comments, on_pr):
+        cso = own is not None and cso_in(comments, on_pr)
+        for c in comments:
+            ok, sha = first_line_marker(c.get("body"), SIGNOFF_LINE_RE)
+            who = _login(c)
+            if (ok and (who in allowed or (who == own and cso)) and trusted_marker(c)
+                    and (sha == head if on_pr else True)):
+                return True
+        return False
     # A head-SHA-bound sign-off on the PR covers it all. Otherwise the high tier must come only from issues
     # this PR closes, and EVERY closed tier:high issue needs its own sign-off. A `Part of` or mention-linked
     # issue can raise the tier but never satisfy it: that sign-off was given for other work.
-    if any(signs(c, True) for c in ctx.get("comments") or []):
+    if signed(ctx.get("comments") or [], True):
         return []
     closing = set(ctx.get("closing_issues") or [])  # GitHub's own parse: keywords plus sidebar links
     high = {k for k, i in issues.items() if effective_tier(i.get("labels")) == "high"}
-    if high and high <= closing and all(any(signs(c, False) for c in issues[k].get("comments") or []) for k in high):
+    if high and high <= closing and all(signed(issues[k].get("comments") or [], False) for k in high):
         return []
+    rerun = ("A new comment doesn't re-run the gate: push, edit the PR, or re-run the sdlc workflow "
+             f"(gh run rerun <run-id> -R {repo}).")
+    if own is not None:
+        who = ", ".join(sorted(allowed | {own}))
+        return [Finding("tier", VIOLATION, "tier:high without a security sign-off.",
+                        f"High tier needs a comment with `{SECURITY_SIGNOFF_MARKER}` from: {who}. `{own}` built or "
+                        f"authored this PR, so `{own}`'s own sign-off counts only next to a /cso evidence comment "
+                        f"whose first line is `{CSO_MARKER} <full 40-char sha>` (the head SHA {head[:7]} on the PR, "
+                        "the reviewed SHA on an issue) and that links the /cso report. It must sit where the "
+                        "sign-off is: on the PR, or on each tier:high issue this PR closes.",
+                        f"Run /cso, post `{CSO_MARKER} <sha>` with the report link next to the sign-off, or ask "
+                        f"a backup signer to sign. {rerun}")]
     who = ", ".join(sorted(allowed)) or "nobody (every signer built or authored this PR)"
     return [Finding("tier", VIOLATION, "tier:high without a security sign-off.",
                     f"High tier needs a comment with `{SECURITY_SIGNOFF_MARKER}` from: {who}. It counts on each "
                     f"tier:high issue this PR closes, or on this PR when it names the head SHA {head[:7]}. "
                     "When the high tier comes from a `Part of` issue, only the PR sign-off works.",
-                    "Ask Security Ops to review the plan and post the sign-off comment on the issue, then re-run the check.")]
+                    f"Ask Security Ops to review the plan and post the sign-off comment on the issue. {rerun}")]
 
 
 def check_builder(repo, pr, ctx, opts, builder, kind) -> list[Finding]:
@@ -907,8 +943,8 @@ def mark_edits(api: Api, items: list[dict]) -> None:
     """Set `edited_by_other` on every comment or review that carries a V1 marker, from its GraphQL edit
     history. The REST author never changes on an edit, and the marker is invisible once rendered, so an
     edit by anyone but the author would otherwise forge it. Any failure is a checker error (exit 2)."""
-    marked = [i for i in items if SELF_REVIEW_MARKER in (i.get("body") or "")
-              or SECURITY_SIGNOFF_MARKER in (i.get("body") or "")]
+    marked = [i for i in items if any(m in (i.get("body") or "")
+                                      for m in (SELF_REVIEW_MARKER, SECURITY_SIGNOFF_MARKER, CSO_MARKER))]
     for start in range(0, len(marked), PER_PAGE):
         batch = marked[start:start + PER_PAGE]
         ids = [i.get("node_id") for i in batch]

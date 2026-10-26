@@ -1142,6 +1142,124 @@ def test_v1_builder_cannot_sign_off_their_own_high_tier_work():
     assert "tier" in checks(v1run(ctx, opts), sc.VIOLATION)
 
 
+# NapticStacks/.github#15: the first signer may sign their own work only with a /cso evidence marker
+# (`<!-- sdlc:cso v1 --> <sha>` plus a link to the report) in the same place the sign-off counts.
+
+CSO_LINK = "https://github.com/NapticStacks/example/pull/42#issuecomment-1"
+
+
+def cso(login=SIGNER, sha=HEAD, link=CSO_LINK, at="2026-10-19T09:00:00Z", edited_by_other=False, body=None):
+    text = body if body is not None else f"{sc.CSO_MARKER} {sha}\n/cso report: {link}" if link else f"{sc.CSO_MARKER} {sha}"
+    return {"user": {"login": login}, "body": text, "created_at": at, "node_id": f"IC_cso_{login}_{at}",
+            "edited_by_other": edited_by_other}
+
+
+def own_work(pr_comments=(), issue_comments=(), builder=SIGNER, author=None):
+    """A tier:high PR whose builder of record (and, if `author`, PR author) is a security signer."""
+    body = make_ctx()["pr"]["body"].replace("Closes #7\n", "Closes #7\n" + V1_SECTIONS.replace(BUILDER, builder))
+    extra = {"user": {"login": author}} if author else {}
+    ctx = v1_ctx(labels=("tier:high",), body=body, comments=[self_review(login=builder), *pr_comments],
+                 issues={7: {"labels": ["tier:high"], "comments": list(issue_comments)}}, **extra)
+    opts = sc.Options(builders=(builder,), security_signers=(SIGNER, BACKUP_SIGNER))
+    return ctx, opts
+
+
+def tier_findings(ctx, opts):
+    return [f for f in v1run(ctx, opts) if f.check == "tier"]
+
+
+def test_cso_first_signer_own_work_with_pr_marker_passes():
+    ctx, opts = own_work(pr_comments=[cso(), signoff(sha=HEAD)])
+    assert tier_findings(ctx, opts) == []
+
+
+def test_cso_first_signer_own_work_with_issue_marker_passes():
+    ctx, opts = own_work(issue_comments=[cso(sha="b" * 40), signoff()])  # the plan or trunk SHA the review ran on
+    assert tier_findings(ctx, opts) == []
+
+
+def test_cso_first_signer_as_pr_author_with_marker_passes():
+    ctx, opts = own_work(pr_comments=[cso(), signoff(sha=HEAD)], builder=BUILDER, author=SIGNER)
+    opts = sc.Options(builders=(BUILDER,), security_signers=(SIGNER, BACKUP_SIGNER))
+    assert tier_findings(ctx, opts) == []
+
+
+def test_cso_own_work_without_marker_fails_with_a_hint_naming_the_marker():
+    ctx, opts = own_work(pr_comments=[signoff(sha=HEAD)], issue_comments=[signoff()])
+    [f] = tier_findings(ctx, opts)
+    assert f.level == sc.VIOLATION
+    assert sc.CSO_MARKER in f.cause + f.fix and SIGNER in f.cause
+
+
+def test_cso_stale_sha_marker_on_the_pr_fails():
+    ctx, opts = own_work(pr_comments=[cso(sha="c" * 40), signoff(sha=HEAD)])
+    assert [f.level for f in tier_findings(ctx, opts)] == [sc.VIOLATION]
+
+
+def test_cso_marker_must_sit_where_the_signoff_counts():
+    # An issue-level marker never unlocks a PR-level sign-off, nor the other way round.
+    ctx, opts = own_work(pr_comments=[signoff(sha=HEAD)], issue_comments=[cso(sha="b" * 40)])
+    assert [f.level for f in tier_findings(ctx, opts)] == [sc.VIOLATION]
+    ctx, opts = own_work(pr_comments=[cso()], issue_comments=[signoff()])
+    assert [f.level for f in tier_findings(ctx, opts)] == [sc.VIOLATION]
+
+
+def test_cso_non_first_signer_own_work_fails_marker_or_not():
+    for comments in ([signoff(login=BACKUP_SIGNER, sha=HEAD)],
+                     [cso(login=BACKUP_SIGNER), signoff(login=BACKUP_SIGNER, sha=HEAD)],
+                     [cso(), signoff(login=BACKUP_SIGNER, sha=HEAD)]):
+        ctx, opts = own_work(pr_comments=comments, builder=BACKUP_SIGNER)
+        assert [f.level for f in tier_findings(ctx, opts)] == [sc.VIOLATION], comments
+
+
+@pytest.mark.parametrize("marker", [
+    cso(link=None),                                     # no link to the /cso run or report
+    cso(login="drive-by-user"),                         # not a security signer
+    cso(edited_by_other=True),                          # someone else edited it
+    cso(body=f"see report\n{sc.CSO_MARKER} {HEAD}\n{CSO_LINK}"),  # marker not on the first line
+    cso(body=f"{sc.CSO_MARKER}\n{CSO_LINK}"),           # no SHA
+    cso(body=f"{sc.CSO_MARKER} {HEAD[:7]}\n{CSO_LINK}"),  # short SHA
+    cso(body=f"{sc.CSO_MARKER} {HEAD.upper()}\n{CSO_LINK}"),  # not lowercase
+    cso(body=f"`{sc.CSO_MARKER} {HEAD}`\n{CSO_LINK}"),  # quoted, not the exact line
+])
+def test_cso_marker_that_does_not_count(marker):
+    ctx, opts = own_work(pr_comments=[marker, signoff(sha=HEAD)])
+    assert [f.level for f in tier_findings(ctx, opts)] == [sc.VIOLATION]
+
+
+def test_cso_marker_alone_is_not_a_signoff():
+    ctx, opts = own_work(pr_comments=[cso()])
+    assert [f.level for f in tier_findings(ctx, opts)] == [sc.VIOLATION]
+
+
+def test_cso_is_not_needed_when_the_first_signer_did_not_build_it():
+    ctx = v1_ctx(labels=("tier:high",), comments=[self_review(), signoff(sha=HEAD)])
+    assert v1run(ctx) == []
+
+
+def test_cso_marker_does_not_change_lower_tiers():
+    for tier in ("tier:low", "tier:medium"):
+        ctx = v1_ctx(labels=(tier,), comments=[self_review(), cso(sha="c" * 40)])
+        assert v1run(ctx) == []
+
+
+def test_cso_warn_mode_still_exits_0():
+    ctx, opts = own_work(pr_comments=[signoff(sha=HEAD)])
+    assert sc.exit_code(v1run(ctx, opts), opts) == 0
+
+
+def test_cso_marker_edit_history_is_read():
+    c = cso(); del c["edited_by_other"]
+    plain = {"user": {"login": SIGNER}, "body": "thanks", "node_id": "IC_plain"}
+
+    class Api:
+        def post(self, path, payload):
+            assert payload["variables"]["ids"] == [c["node_id"]]
+            return {"data": {"nodes": [gnode(SIGNER)]}}
+    sc.mark_edits(Api(), [c, plain])
+    assert c["edited_by_other"] is False and "edited_by_other" not in plain
+
+
 def test_v1_high_with_no_signers_configured_fails_closed():
     ctx = v1_ctx(labels=("tier:high",), issues={7: {"labels": ["tier:high"], "comments": [signoff()]}})
     opts = sc.Options(builders=V1_OPTS.builders)
