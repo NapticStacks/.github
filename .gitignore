@@ -3,3 +3,8 @@ package-lock.json
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Inventor notebooks: local only, never committed
+DARIEN-CONFIDENTIAL/
+JORDAN-CONFIDENTIAL/
+BEN-CONFIDENTIAL/
