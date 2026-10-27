@@ -1,6 +1,16 @@
 # Changelog
 
-## sdlc-conformance-v3 (unreleased; tag cut on merge)
+## Unreleased
+
+Callers pin `sdlc-conformance-v3` (or an older tag or SHA), so none of this takes effect until a tag is cut or
+moved.
+
+- `tier` (NapticStacks/.github#15): the first `security_signers` login may sign off `tier:high` work they built
+  or authored when a valid `<!-- sdlc:cso v1 --> <full 40-char lowercase sha>` comment, linking the `/cso`
+  report, sits in the same place as the sign-off. The full rule is in the workflows README ("What v3 adds").
+  Later signers never sign their own work. Lower tiers, check ids and warn/block semantics are unchanged.
+
+## sdlc-conformance-v3 (2026-10-15)
 
 - SDLC V1 checks, for PRs created at or after the cutover (`2026-10-16T00:00:00Z`, input `cutover`):
   `tier` (highest `tier:*` label on the PR or its same-repo issues; none is a medium note; `tier:high` needs a

@@ -176,7 +176,21 @@ All of it skips PRs created before `cutover` (default `2026-10-16T00:00:00Z`). T
   - A linked issue that can't be read (404) means tier unknown: a violation, never a silent medium.
   - Only cross-repo issues linked and no `tier:*` on the PR: a violation. Add the label to the PR.
   - `tier:high` needs a security sign-off from the first `security_signers` login (or a later one when the first
-    one built it). Neither a `Builder:` login nor the PR author can sign.
+    one built it). Neither a `Builder:` login nor the PR author can sign, with one exception
+    ([#15](https://github.com/NapticStacks/.github/issues/15)): the **first** `security_signers` login may sign
+    work they built or authored when a `/cso` evidence comment sits in the same place as the sign-off. Its first
+    line is exactly `<!-- sdlc:cso v1 --> <full 40-char lowercase sha>`, and it is posted by any
+    `security_signers` login. A later line links the `/cso` run or its report comment: a NapticStacks Actions run
+    (`https://github.com/NapticStacks/<repo>/actions/runs/<id>`), or a comment or review on a NapticStacks issue
+    or PR (`.../pull/<n>#issuecomment-<id>`, `#pullrequestreview-<id>`). Any other URL doesn't count. On the PR
+    the SHA must be the head, so a push makes it stale. On a closed `tier:high` issue it is the plan or trunk SHA
+    the review ran against: it must be a commit GitHub can resolve for this repo (a lookup that can also
+    resolve a commit living only in a fork in the same network), and one-character placeholders like `"0" * 40`
+    never count. A later signer never signs their own work, marker or not.
+  - **What the marker can't prove:** the gate checks the link's form, not what's behind it. It can't tell that
+    the linked `/cso` run reviewed that SHA, or that the signer didn't write the linked comment themselves. The
+    marker is the signer's own word; the reviewer opens the link. This README is the one full statement of the
+    rule; the gate's code and findings point here.
   - **Where it counts:** on the PR with the head SHA (covers everything), or on each `tier:high` issue the PR
     closes. "Closes" means GitHub's own `closingIssuesReferences` (its parse of the body plus sidebar links), read
     over GraphQL; the gate never parses Closes/Fixes itself. A `Part of` or mentioned issue can raise the tier but
@@ -198,6 +212,8 @@ All of it skips PRs created before `cutover` (default `2026-10-16T00:00:00Z`). T
   | Self-review PR review | `<!-- sdlc:self-review v1 -->`, optionally followed by ` <head sha>` |
   | Security sign-off on the PR | `<!-- sdlc:security-signoff v1 --> <head sha>` |
   | Security sign-off on a closed `tier:high` issue | `<!-- sdlc:security-signoff v1 -->`, optionally followed by ` <sha>` |
+  | `/cso` evidence on the PR (first signer's own work) | `<!-- sdlc:cso v1 --> <head sha>`, report link on a later line |
+  | `/cso` evidence on a closed `tier:high` issue | `<!-- sdlc:cso v1 --> <reviewed sha>`, report link on a later line |
 
   A comment that also contains the handoff packet (`<!-- sdlc:handoff v1`) never counts.
 - **Edited markers don't count.** A marker comment or review counts only if nobody but its author ever edited it.
@@ -210,6 +226,10 @@ All of it skips PRs created before `cutover` (default `2026-10-16T00:00:00Z`). T
 - **Known gaps (stale green):** the caller has no `issue_comment` or issue-label trigger. So a green result stays
   green after a sign-off is deleted, or after a linked issue is raised to `tier:high`, until the next PR event or a
   manual re-run. A new comment doesn't re-run it either. Re-run the check before you rely on it.
+  - That includes the sign-off and `/cso` comments: after posting them, re-run the `sdlc` workflow
+    (`gh run rerun <run-id> -R <owner/repo>`) or trigger a PR event. An `issue_comment` trigger isn't added
+    because GitHub runs it in the default branch's context: its check run lands on the default branch's commit,
+    not on the PR head, so it can't turn the PR's `sdlc / sdlc-conformance` check green.
 
 ### v1 / v2 / v3 compatibility
 

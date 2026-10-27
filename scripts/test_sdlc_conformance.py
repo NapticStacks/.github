@@ -1142,6 +1142,235 @@ def test_v1_builder_cannot_sign_off_their_own_high_tier_work():
     assert "tier" in checks(v1run(ctx, opts), sc.VIOLATION)
 
 
+# NapticStacks/.github#15: the first signer may sign their own work only with a /cso evidence marker
+# (`<!-- sdlc:cso v1 --> <sha>` plus a link to the /cso run or report comment) in the same place the sign-off counts.
+
+CSO_LINK = "https://github.com/NapticStacks/example/pull/42#issuecomment-1"
+REVIEWED = "3f9c2a7e1b4d6058a9c7e2f13b5d8a6c4e0f9b21"  # a plan or trunk SHA that exists in the repo
+
+
+def cso(login=SIGNER, sha=HEAD, link=CSO_LINK, at="2026-10-19T09:00:00Z", edited_by_other=False, body=None,
+        sha_exists=None):
+    if body is None:
+        body = f"{sc.CSO_MARKER} {sha}"
+        if link:
+            body += f"\n/cso report: {link}"
+    c = {"user": {"login": login}, "body": body, "created_at": at, "node_id": f"IC_cso_{login}_{at}",
+         "edited_by_other": edited_by_other}
+    if sha_exists is not None:
+        c["sha_exists"] = sha_exists
+    return c
+
+
+def issue_cso(**kw):
+    """An issue-level marker: the reviewed SHA, which gather proved exists in the repo."""
+    return cso(**{"sha": REVIEWED, "sha_exists": True, **kw})
+
+
+def own_work(pr_comments=(), issue_comments=(), builder=SIGNER, author=None, issues=None, closing=(7,)):
+    """A tier:high PR whose builder of record (and, if `author`, PR author) is a security signer."""
+    body = make_ctx()["pr"]["body"].replace("Closes #7\n", "Closes #7\n" + V1_SECTIONS.replace(BUILDER, builder))
+    extra = {"user": {"login": author}} if author else {}
+    if issues is None:
+        issues = {7: {"labels": ["tier:high"], "comments": list(issue_comments)}}
+    ctx = v1_ctx(labels=("tier:high",), body=body, comments=[self_review(login=builder), *pr_comments],
+                 issues=issues, closing=closing, **extra)
+    opts = sc.Options(builders=(builder,), security_signers=(SIGNER, BACKUP_SIGNER))
+    return ctx, opts
+
+
+def tier_levels(ctx, opts):
+    return [f.level for f in v1run(ctx, opts) if f.check == "tier"]
+
+
+def test_cso_first_signer_own_work_with_pr_marker_passes():
+    ctx, opts = own_work(pr_comments=[cso(), signoff(sha=HEAD)])
+    assert tier_levels(ctx, opts) == []
+
+
+def test_cso_first_signer_own_work_with_issue_marker_passes():
+    ctx, opts = own_work(issue_comments=[issue_cso(), signoff()])
+    assert tier_levels(ctx, opts) == []
+
+
+def test_cso_first_signer_as_pr_author_with_marker_passes():
+    ctx, opts = own_work(pr_comments=[cso(), signoff(sha=HEAD)], builder=BUILDER, author=SIGNER)
+    assert tier_levels(ctx, opts) == []
+
+
+def test_cso_marker_posted_by_a_backup_signer_counts():
+    # Pinned: any security signer may post the /cso evidence (a backup running /cso is more independent, not less).
+    ctx, opts = own_work(pr_comments=[cso(login=BACKUP_SIGNER), signoff(sha=HEAD)])
+    assert tier_levels(ctx, opts) == []
+
+
+def test_cso_own_work_without_marker_fails_with_a_hint_naming_the_marker():
+    ctx, opts = own_work(pr_comments=[signoff(sha=HEAD)], issue_comments=[signoff()])
+    [f] = [f for f in v1run(ctx, opts) if f.check == "tier"]
+    assert f.level == sc.VIOLATION
+    assert SIGNER in f.cause and sc.CSO_MARKER in f.cause
+    assert f"{sc.CSO_MARKER} {HEAD}" in f.fix  # the line to paste, with the full head so a copy works
+    assert sc.CSO_SPEC in f.fix  # the README holds the full rule; the finding doesn't restate it
+    assert sc.CSO_SPEC.endswith("README.md#what-v3-adds-sdlc-v1")
+    assert len(f.cause) < 300
+
+
+def test_cso_stale_sha_marker_on_the_pr_fails():
+    ctx, opts = own_work(pr_comments=[cso(sha="c" * 40), signoff(sha=HEAD)])
+    assert tier_levels(ctx, opts) == [sc.VIOLATION]
+
+
+def test_cso_issue_marker_on_the_pr_with_issue_signoff_fails():
+    ctx, opts = own_work(pr_comments=[cso()], issue_comments=[signoff()])
+    assert tier_levels(ctx, opts) == [sc.VIOLATION]
+
+
+def test_cso_pr_signoff_with_only_an_issue_marker_fails():
+    ctx, opts = own_work(pr_comments=[signoff(sha=HEAD)], issue_comments=[issue_cso()])
+    assert tier_levels(ctx, opts) == [sc.VIOLATION]
+
+
+def test_cso_one_marker_never_covers_two_closed_high_issues():
+    issues = {7: {"labels": ["tier:high"], "comments": [issue_cso(), signoff()]},
+              5: {"labels": ["tier:high"], "comments": [signoff()]}}
+    ctx, opts = own_work(issues=issues, closing=(7, 5))
+    ctx["pr"]["body"] = ctx["pr"]["body"].replace("Closes #7\n", "Closes #7\nCloses #5\n")
+    assert tier_levels(ctx, opts) == [sc.VIOLATION]
+    issues[5]["comments"].insert(0, issue_cso(at="2026-10-19T09:30:00Z"))
+    assert tier_levels(ctx, opts) == []
+
+
+@pytest.mark.parametrize("comments", [
+    [signoff(login=BACKUP_SIGNER, sha=HEAD)],
+    [cso(login=BACKUP_SIGNER), signoff(login=BACKUP_SIGNER, sha=HEAD)],
+    [cso(), signoff(login=BACKUP_SIGNER, sha=HEAD)],
+])
+def test_cso_non_first_signer_own_work_fails_marker_or_not(comments):
+    ctx, opts = own_work(pr_comments=comments, builder=BACKUP_SIGNER)
+    assert tier_levels(ctx, opts) == [sc.VIOLATION]
+
+
+@pytest.mark.parametrize("link", [
+    "https://github.com/NapticStacks/example/pull/42#issuecomment-123",
+    "https://github.com/NapticStacks/example/issues/7#issuecomment-123",
+    "https://github.com/NapticStacks/example/pull/42#pullrequestreview-123",
+    "https://github.com/NapticStacks/example/actions/runs/123",
+    "https://github.com/NapticStacks/example/actions/runs/123/job/456",
+    "https://github.com/napticstacks/other-repo/pull/9#issuecomment-1",
+])
+def test_cso_report_link_forms_that_count(link):
+    ctx, opts = own_work(pr_comments=[cso(link=f"[report]({link})"), signoff(sha=HEAD)])
+    assert tier_levels(ctx, opts) == []
+
+
+@pytest.mark.parametrize("link", [
+    "https://example.com/cso-report",                                   # not GitHub
+    "https://github.com/someone-else/example/pull/42#issuecomment-1",   # outside the org
+    "https://github.com/NapticStacks/example/pull/42",                  # not a comment, review or run
+    "http://github.com/NapticStacks/example/actions/runs/123",          # not https
+    "https://github.com.evil.io/NapticStacks/example/actions/runs/1",   # look-alike host
+    "https://github.com/NapticStacks/example/actions/runs/",            # no run id
+])
+def test_cso_report_link_forms_that_do_not_count(link):
+    ctx, opts = own_work(pr_comments=[cso(link=link), signoff(sha=HEAD)])
+    assert tier_levels(ctx, opts) == [sc.VIOLATION]
+
+
+@pytest.mark.parametrize("marker", [
+    issue_cso(sha="0" * 40),               # placeholder: all one character
+    issue_cso(sha="f" * 40),
+    issue_cso(sha_exists=False),           # gather found no such commit in the repo
+    cso(sha=REVIEWED),                     # existence never checked: fails closed
+])
+def test_cso_issue_marker_needs_a_real_reviewed_sha(marker):
+    ctx, opts = own_work(issue_comments=[marker, signoff()])
+    assert tier_levels(ctx, opts) == [sc.VIOLATION]
+
+
+@pytest.mark.parametrize("marker", [
+    cso(link=None),                                     # no link to the /cso run or report
+    cso(login="drive-by-user"),                         # not a security signer
+    cso(edited_by_other=True),                          # someone else edited it
+    cso(body=f"see report\n{sc.CSO_MARKER} {HEAD}\n{CSO_LINK}"),  # marker not on the first line
+    cso(body=f"{sc.CSO_MARKER}\n{CSO_LINK}"),           # no SHA
+    cso(body=f"{sc.CSO_MARKER} {HEAD[:7]}\n{CSO_LINK}"),  # short SHA
+    cso(body=f"{sc.CSO_MARKER} {HEAD.upper()}\n{CSO_LINK}"),  # not lowercase
+    cso(body=f"`{sc.CSO_MARKER} {HEAD}`\n{CSO_LINK}"),  # quoted, not the exact line
+    cso(body=f"{sc.CSO_MARKER} {HEAD} {CSO_LINK}"),     # link on the marker line, not below it
+])
+def test_cso_marker_that_does_not_count(marker):
+    ctx, opts = own_work(pr_comments=[marker, signoff(sha=HEAD)])
+    assert tier_levels(ctx, opts) == [sc.VIOLATION]
+
+
+def test_cso_marker_with_crlf_and_leading_blank_lines_counts():
+    body = f"\r\n\r\n{sc.CSO_MARKER} {HEAD}\r\n/cso report: {CSO_LINK}\r\n"
+    ctx, opts = own_work(pr_comments=[cso(body=body), signoff(sha=HEAD)])
+    assert tier_levels(ctx, opts) == []
+
+
+def test_marker_parts_returns_the_rest_of_the_body():
+    assert sc.marker_parts(f"\n{sc.CSO_MARKER} {HEAD}\nline two\nline three", sc.CSO_LINE_RE) == (
+        True, HEAD, "line two\nline three")
+    assert sc.marker_parts("no marker", sc.CSO_LINE_RE) == (False, None, "")
+
+
+def test_cso_marker_alone_is_not_a_signoff():
+    ctx, opts = own_work(pr_comments=[cso()])
+    assert tier_levels(ctx, opts) == [sc.VIOLATION]
+
+
+def test_cso_is_not_needed_when_the_first_signer_did_not_build_it():
+    ctx = v1_ctx(labels=("tier:high",), comments=[self_review(), signoff(sha=HEAD)])
+    assert v1run(ctx) == []
+
+
+@pytest.mark.parametrize("tier", ["tier:low", "tier:medium"])
+def test_cso_marker_does_not_change_lower_tiers(tier):
+    ctx = v1_ctx(labels=(tier,), comments=[self_review(), cso(sha="c" * 40)])
+    assert v1run(ctx) == []
+
+
+def test_cso_warn_mode_still_exits_0():
+    ctx, opts = own_work(pr_comments=[signoff(sha=HEAD)])
+    assert sc.exit_code(v1run(ctx, opts), opts) == 0
+
+
+def test_cso_marker_edit_history_is_read():
+    c = cso()
+    del c["edited_by_other"]
+    plain = {"user": {"login": SIGNER}, "body": "thanks", "node_id": "IC_plain"}
+
+    class Api:
+        def post(self, path, payload):
+            assert payload["variables"]["ids"] == [c["node_id"]]
+            return {"data": {"nodes": [gnode(SIGNER)]}}
+    sc.mark_edits(Api(), [c, plain])
+    assert c["edited_by_other"] is False
+    assert "edited_by_other" not in plain
+
+
+@pytest.mark.parametrize("route, expected", [({"sha": REVIEWED}, True), (404, False), (422, False)])
+def test_cso_gather_checks_the_issue_marker_sha_exists(route, expected):
+    c = issue_cso()
+    del c["edited_by_other"], c["sha_exists"]
+    routes = v1_routes({"body": "Closes #7\nBuilder: @example-dev"}, issue_labels=["tier:high"], issue_comments=[c])
+    routes[f"/repos/NapticStacks/example/git/commits/{REVIEWED}"] = route
+    transport = GraphTransport(routes, {c["node_id"]: gnode(SIGNER)})
+    ctx = sc.gather(sc.Api("t0ken", transport), REPO, 42)
+    assert ctx["linked_issues"][7]["comments"][0]["sha_exists"] is expected
+
+
+def test_cso_gather_commit_lookup_error_is_a_checker_error():
+    c = issue_cso()
+    del c["edited_by_other"], c["sha_exists"]
+    routes = v1_routes({"body": "Closes #7\nBuilder: @example-dev"}, issue_labels=["tier:high"], issue_comments=[c])
+    routes[f"/repos/NapticStacks/example/git/commits/{REVIEWED}"] = 500
+    transport = GraphTransport(routes, {c["node_id"]: gnode(SIGNER)})
+    with pytest.raises(sc.CheckerError):
+        sc.gather(sc.Api("t0ken", transport), REPO, 42)
+
+
 def test_v1_high_with_no_signers_configured_fails_closed():
     ctx = v1_ctx(labels=("tier:high",), issues={7: {"labels": ["tier:high"], "comments": [signoff()]}})
     opts = sc.Options(builders=V1_OPTS.builders)

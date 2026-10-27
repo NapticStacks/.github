@@ -8,6 +8,8 @@
 # v3 (SDLC V1) adds the checks `tier`, `builder-of-record` and `self-review`, and
 # the template sections Builder, Workstation, Session and Tier. They skip PRs
 # created before `cutover`. New inputs: `builders`, `security_signers`, `cutover`.
+# A `/cso` evidence comment (`<!-- sdlc:cso v1 --> <sha>`) lets the first signer
+# sign their own tier:high work (#15). No issue_comment trigger: re-run after posting.
 # The org caller template is workflow-templates/sdlc.yml.
 #
 # v2 adds a second job, `sdlc / sdlc-ready`, which posts the `sdlc/ready` commit
