@@ -1208,8 +1208,11 @@ def test_cso_own_work_without_marker_fails_with_a_hint_naming_the_marker():
     ctx, opts = own_work(pr_comments=[signoff(sha=HEAD)], issue_comments=[signoff()])
     [f] = [f for f in v1run(ctx, opts) if f.check == "tier"]
     assert f.level == sc.VIOLATION
-    assert sc.CSO_MARKER in f.cause + f.fix and SIGNER in f.cause
-    assert f"{sc.CSO_MARKER} {HEAD}" in f.cause  # the full head, so a copied marker works
+    assert SIGNER in f.cause and sc.CSO_MARKER in f.cause
+    assert f"{sc.CSO_MARKER} {HEAD}" in f.fix  # the line to paste, with the full head so a copy works
+    assert sc.CSO_SPEC in f.fix  # the README holds the full rule; the finding doesn't restate it
+    assert sc.CSO_SPEC.endswith("README.md#what-v3-adds-sdlc-v1")
+    assert len(f.cause) < 300
 
 
 def test_cso_stale_sha_marker_on_the_pr_fails():

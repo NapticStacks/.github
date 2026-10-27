@@ -184,10 +184,13 @@ All of it skips PRs created before `cutover` (default `2026-10-16T00:00:00Z`). T
     (`https://github.com/NapticStacks/<repo>/actions/runs/<id>`), or a comment or review on a NapticStacks issue
     or PR (`.../pull/<n>#issuecomment-<id>`, `#pullrequestreview-<id>`). Any other URL doesn't count. On the PR
     the SHA must be the head, so a push makes it stale. On a closed `tier:high` issue it is the plan or trunk SHA
-    the review ran against: the gate checks that commit exists in the repo and rejects one-character placeholders
-    like `"0" * 40`. A later signer never signs their own work, marker or not.
-  - **What the marker can't prove:** the gate checks the link's form, not what's behind it, and can't tell that
-    the linked `/cso` run reviewed that SHA. The marker is the signer's own word; the reviewer opens the link.
+    the review ran against: it must be a commit GitHub can resolve for this repo (a lookup that can also
+    resolve a commit living only in a fork in the same network), and one-character placeholders like `"0" * 40`
+    never count. A later signer never signs their own work, marker or not.
+  - **What the marker can't prove:** the gate checks the link's form, not what's behind it. It can't tell that
+    the linked `/cso` run reviewed that SHA, or that the signer didn't write the linked comment themselves. The
+    marker is the signer's own word; the reviewer opens the link. This README is the one full statement of the
+    rule; the gate's code and findings point here.
   - **Where it counts:** on the PR with the head SHA (covers everything), or on each `tier:high` issue the PR
     closes. "Closes" means GitHub's own `closingIssuesReferences` (its parse of the body plus sidebar links), read
     over GraphQL; the gate never parses Closes/Fixes itself. A `Part of` or mentioned issue can raise the tier but

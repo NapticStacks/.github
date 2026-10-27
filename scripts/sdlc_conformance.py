@@ -321,8 +321,8 @@ SHA40 = r"([0-9a-f]{40})"
 SELF_REVIEW_LINE_RE = re.compile(r"^" + re.escape(SELF_REVIEW_MARKER) + r"(?: " + SHA40 + r")?$")
 SIGNOFF_LINE_RE = re.compile(r"^" + re.escape(SECURITY_SIGNOFF_MARKER) + r"(?: " + SHA40 + r")?$")
 CSO_LINE_RE = re.compile(r"^" + re.escape(CSO_MARKER) + r" " + SHA40 + r"$")  # the SHA is required
-# Where a /cso report lives (gates.md: "link the /cso run or its report comment"): a comment or review on a
-# NapticStacks issue or PR, or a NapticStacks Actions run. Any other URL is not a /cso report link.
+# The /cso marker rule's one full statement is the workflows README (CSO_SPEC). This is its link allowlist.
+CSO_SPEC = "https://github.com/NapticStacks/.github/blob/main/.github/workflows/README.md#what-v3-adds-sdlc-v1"
 CSO_LINK_RE = re.compile(
     r"(?<![\w.:/-])https://github\.com/(?i:NapticStacks)/[A-Za-z0-9._-]+/"
     r"(?:(?:pull|issues)/\d+#(?:issuecomment|pullrequestreview)-\d+|actions/runs/\d+(?:/job/\d+)?)(?![\w/])")
@@ -558,33 +558,30 @@ def check_tier(repo, pr, ctx, opts, builders) -> list[Finding]:
     # the same place as the sign-off (NapticStacks/.github#15).
     excluded = {b.lower() for b in builders} | {_login(pr)}
     first = signers[0]
-    own = first if first in excluded else None
-    allowed = {first} if own is None else set(signers[1:])
+    own_signer = first if first in excluded else None
+    allowed = {first} if own_signer is None else set(signers[1:])
     allowed -= excluded
     head = pr["head"]["sha"]
 
     def cso_in(comments, on_pr):
-        """A /cso evidence marker: the exact first line `<!-- sdlc:cso v1 --> <sha>`, a /cso report link
-        (CSO_LINK_RE) below it, by any security signer, edited by nobody else. On the PR the SHA must be the
-        head, so a push makes it stale. On an issue it is the plan or trunk SHA the review ran against: never a
-        placeholder, and gather must have proved the commit exists in this repo (`sha_exists`). The gate can't
-        prove the /cso run reviewed that SHA; the link is there for the human reviewer to check."""
+        """Whether `comments` hold a valid /cso evidence marker. The rule is in the README (CSO_SPEC)."""
         for c in comments:
             ok, sha, rest = marker_parts(c.get("body"), CSO_LINE_RE)
             if not (ok and _login(c) in signers and trusted_marker(c) and CSO_LINK_RE.search(rest)):
                 continue
-            # On the PR the head itself is the proof; on an issue a placeholder never counts, and gather must
-            # have found the commit.
-            if (sha == head) if on_pr else (not placeholder_sha(sha) and c.get("sha_exists") is True):
+            if on_pr:
+                if sha == head:
+                    return True
+            elif not placeholder_sha(sha) and c.get("sha_exists") is True:
                 return True
         return False
 
     def signed(comments, on_pr):
-        cso = own is not None and cso_in(comments, on_pr)
+        cso = own_signer is not None and cso_in(comments, on_pr)
         for c in comments:
             ok, sha = first_line_marker(c.get("body"), SIGNOFF_LINE_RE)
             who = _login(c)
-            if (ok and (who in allowed or (who == own and cso)) and trusted_marker(c)
+            if (ok and (who in allowed or (who == own_signer and cso)) and trusted_marker(c)
                     and (sha == head if on_pr else True)):
                 return True
         return False
@@ -599,17 +596,16 @@ def check_tier(repo, pr, ctx, opts, builders) -> list[Finding]:
         return []
     rerun = ("A new comment doesn't re-run the gate: push, edit the PR, or re-run the sdlc workflow "
              f"(gh run rerun <run-id> -R {repo}).")
-    if own is not None:
-        who = ", ".join(sorted(allowed | {own}))
+    if own_signer is not None:
+        who = ", ".join(sorted(allowed | {own_signer}))
         return [Finding("tier", VIOLATION, "tier:high without a security sign-off.",
-                        f"High tier needs a comment with `{SECURITY_SIGNOFF_MARKER}` from: {who}. `{own}` built or "
-                        f"authored this PR, so `{own}`'s own sign-off counts only next to a /cso evidence comment "
-                        f"whose first line is `{CSO_MARKER} <full 40-char lowercase sha>`: `{CSO_MARKER} {head}` on "
-                        "the PR, the reviewed SHA on an issue. A later line links the /cso run or its report "
-                        "comment (a NapticStacks Actions run, or an issue or PR comment). It must sit where the "
-                        "sign-off is: on the PR, or on each tier:high issue this PR closes.",
-                        f"Run /cso, post `{CSO_MARKER} <sha>` with the report link next to the sign-off, or ask "
-                        f"a backup signer to sign. {rerun}")]
+                        f"High tier needs a comment with `{SECURITY_SIGNOFF_MARKER}` from: {who}. `{own_signer}` "
+                        f"built or authored this PR, so that sign-off also needs a valid `{CSO_MARKER}` comment "
+                        "in the same place, and none was found.",
+                        f"Run /cso and post, next to the sign-off on this PR, a comment starting "
+                        f"`{CSO_MARKER} {head}` with the /cso report link on the next line (on an issue, use the reviewed SHA; "
+                        f"rule: {CSO_SPEC}). "
+                        f"Or ask a backup signer to sign. {rerun}")]
     who = ", ".join(sorted(allowed)) or "nobody (every signer built or authored this PR)"
     return [Finding("tier", VIOLATION, "tier:high without a security sign-off.",
                     f"High tier needs a comment with `{SECURITY_SIGNOFF_MARKER}` from: {who}. It counts on each "
@@ -1017,16 +1013,16 @@ def gather_v1(api: Api, ctx: dict) -> None:
                 issues[n] = {"labels": label_names(raw[n].get("labels")), "comments": []}
     ctx["issue_cache"] = raw
     ctx["linked_issues"] = issues
-    known: dict[str, bool] = {}
+    sha_exists_cache: dict[str, bool] = {}
     for n, issue in issues.items():
         if issue is not None and effective_tier(issue["labels"]) == "high":
             issue["comments"] = api.paged(f"/repos/{repo}/issues/{n}/comments")
             for c in issue["comments"]:
                 ok, sha = first_line_marker(c.get("body"), CSO_LINE_RE)
                 if ok and not placeholder_sha(sha):
-                    if sha not in known:
-                        known[sha] = commit_exists(api, repo, sha)
-                    c["sha_exists"] = known[sha]
+                    if sha not in sha_exists_cache:
+                        sha_exists_cache[sha] = commit_exists(api, repo, sha)
+                    c["sha_exists"] = sha_exists_cache[sha]
     mark_edits(api, ctx["comments"] + ctx["reviews"]
                + [c for i in issues.values() if i for c in i["comments"]])
     builder = builder_of_record(pr.get("body"))
@@ -1041,8 +1037,9 @@ def gather_v1(api: Api, ctx: dict) -> None:
 
 
 def commit_exists(api: Api, repo: str, sha: str) -> bool:
-    """Whether `sha` is a commit in `repo` (an issue-level /cso marker's reviewed SHA). 404 or 422 means no;
-    any other failure is a checker error."""
+    """Whether GitHub can resolve `sha` as a commit for `repo` (an issue-level /cso marker's reviewed SHA).
+    That can include a commit that only lives in a fork in the same network; it is not proof the commit is on
+    a branch of `repo`. 404 or 422 means no; any other failure is a checker error."""
     try:
         api.get(f"/repos/{repo}/git/commits/{sha}")
     except ApiError as e:

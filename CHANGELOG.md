@@ -3,19 +3,12 @@
 ## Unreleased
 
 Callers pin `sdlc-conformance-v3` (or an older tag or SHA), so none of this takes effect until a tag is cut or
-moved. Gate that on a backup security signer's sign-off on PR #18.
+moved.
 
 - `tier` (NapticStacks/.github#15): the first `security_signers` login may sign off `tier:high` work they built
-  or authored when a `/cso` evidence comment sits in the same place as the sign-off:
-  - first line exactly `<!-- sdlc:cso v1 --> <full 40-char lowercase sha>`: the head SHA on the PR, so a push
-    makes it stale; on a closed `tier:high` issue, the reviewed SHA, which must exist in the repo (the gate reads
-    it from the API) and can't be a placeholder like `"0" * 40`;
-  - a later line links the `/cso` run or its report comment: a NapticStacks Actions run, or a comment or review
-    on a NapticStacks issue or PR. Other URLs don't count;
-  - posted by any `security_signers` login and edited by nobody else.
-
-  Without it the own-work sign-off still fails, and the fix names the marker with the full head SHA. Later
-  signers never sign their own work. Lower tiers, check ids and warn/block semantics are unchanged.
+  or authored when a valid `<!-- sdlc:cso v1 --> <full 40-char lowercase sha>` comment, linking the `/cso`
+  report, sits in the same place as the sign-off. The full rule is in the workflows README ("What v3 adds").
+  Later signers never sign their own work. Lower tiers, check ids and warn/block semantics are unchanged.
 
 ## sdlc-conformance-v3 (2026-10-15)
 
