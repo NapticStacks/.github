@@ -179,10 +179,15 @@ All of it skips PRs created before `cutover` (default `2026-10-16T00:00:00Z`). T
     one built it). Neither a `Builder:` login nor the PR author can sign, with one exception
     ([#15](https://github.com/NapticStacks/.github/issues/15)): the **first** `security_signers` login may sign
     work they built or authored when a `/cso` evidence comment sits in the same place as the sign-off. Its first
-    line is exactly `<!-- sdlc:cso v1 --> <full 40-char lowercase sha>`, a later line links the `/cso` run or
-    report, and it is posted by a `security_signers` login. On the PR the SHA must be the head, so a push makes
-    it stale. On a closed `tier:high` issue it is the plan or trunk SHA the review ran against. A later signer
-    never signs their own work, marker or not.
+    line is exactly `<!-- sdlc:cso v1 --> <full 40-char lowercase sha>`, and it is posted by any
+    `security_signers` login. A later line links the `/cso` run or its report comment: a NapticStacks Actions run
+    (`https://github.com/NapticStacks/<repo>/actions/runs/<id>`), or a comment or review on a NapticStacks issue
+    or PR (`.../pull/<n>#issuecomment-<id>`, `#pullrequestreview-<id>`). Any other URL doesn't count. On the PR
+    the SHA must be the head, so a push makes it stale. On a closed `tier:high` issue it is the plan or trunk SHA
+    the review ran against: the gate checks that commit exists in the repo and rejects one-character placeholders
+    like `"0" * 40`. A later signer never signs their own work, marker or not.
+  - **What the marker can't prove:** the gate checks the link's form, not what's behind it, and can't tell that
+    the linked `/cso` run reviewed that SHA. The marker is the signer's own word; the reviewer opens the link.
   - **Where it counts:** on the PR with the head SHA (covers everything), or on each `tier:high` issue the PR
     closes. "Closes" means GitHub's own `closingIssuesReferences` (its parse of the body plus sidebar links), read
     over GraphQL; the gate never parses Closes/Fixes itself. A `Part of` or mentioned issue can raise the tier but

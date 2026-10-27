@@ -321,20 +321,37 @@ SHA40 = r"([0-9a-f]{40})"
 SELF_REVIEW_LINE_RE = re.compile(r"^" + re.escape(SELF_REVIEW_MARKER) + r"(?: " + SHA40 + r")?$")
 SIGNOFF_LINE_RE = re.compile(r"^" + re.escape(SECURITY_SIGNOFF_MARKER) + r"(?: " + SHA40 + r")?$")
 CSO_LINE_RE = re.compile(r"^" + re.escape(CSO_MARKER) + r" " + SHA40 + r"$")  # the SHA is required
-LINK_RE = re.compile(r"https?://\S+")
+# Where a /cso report lives (gates.md: "link the /cso run or its report comment"): a comment or review on a
+# NapticStacks issue or PR, or a NapticStacks Actions run. Any other URL is not a /cso report link.
+CSO_LINK_RE = re.compile(
+    r"(?<![\w.:/-])https://github\.com/(?i:NapticStacks)/[A-Za-z0-9._-]+/"
+    r"(?:(?:pull|issues)/\d+#(?:issuecomment|pullrequestreview)-\d+|actions/runs/\d+(?:/job/\d+)?)(?![\w/])")
+
+
+def marker_parts(body: str | None, line_re: re.Pattern) -> tuple[bool, str | None, str]:
+    """(matched, sha, rest) for a marker on the body's FIRST non-empty line, exactly: the marker at column 0,
+    then what `line_re` allows after it (one space and a full lowercase 40-hex SHA, optional or required per
+    marker), then nothing (trailing whitespace and CR are stripped). `rest` is the body after that line, or ""
+    when there is no marker. The first line decides, so fences, quotes and HTML never matter. A body that also
+    carries the handoff packet is never a marker."""
+    text = body or ""
+    if HANDOFF_MARKER in text:
+        return False, None, ""
+    lines = text.splitlines()
+    i = next((k for k, l in enumerate(lines) if l.strip()), None)
+    m = line_re.match(lines[i].rstrip()) if i is not None else None
+    return (True, m.group(1), "\n".join(lines[i + 1:])) if m else (False, None, "")
 
 
 def first_line_marker(body: str | None, line_re: re.Pattern) -> tuple[bool, str | None]:
-    """(matched, sha) for a marker on the body's FIRST non-empty line, exactly: the marker at column 0,
-    then optionally one space and a full lowercase 40-hex SHA, then nothing (trailing whitespace and CR are
-    stripped). Everything after that line is ignored, so fences, quotes and HTML never matter. A body that
-    also carries the handoff packet is never a marker."""
-    text = body or ""
-    if HANDOFF_MARKER in text:
-        return False, None
-    first = next((l.rstrip() for l in text.splitlines() if l.strip()), "")
-    m = line_re.match(first)
-    return (True, m.group(1)) if m else (False, None)
+    """(matched, sha): `marker_parts` without the rest of the body."""
+    ok, sha, _ = marker_parts(body, line_re)
+    return ok, sha
+
+
+def placeholder_sha(sha: str | None) -> bool:
+    """A SHA made of one repeated character (`"0" * 40`) is a placeholder, never a reviewed commit."""
+    return not sha or len(set(sha)) == 1
 
 
 def trusted_marker(item: dict) -> bool:
@@ -547,14 +564,18 @@ def check_tier(repo, pr, ctx, opts, builders) -> list[Finding]:
     head = pr["head"]["sha"]
 
     def cso_in(comments, on_pr):
-        """A /cso evidence marker: the exact first line `<!-- sdlc:cso v1 --> <sha>`, a link to the run or report
-        below it, by a security signer, edited by nobody else. On the PR the SHA must be the head, so a push
-        makes it stale; on an issue it is the plan or trunk SHA the review ran against."""
+        """A /cso evidence marker: the exact first line `<!-- sdlc:cso v1 --> <sha>`, a /cso report link
+        (CSO_LINK_RE) below it, by any security signer, edited by nobody else. On the PR the SHA must be the
+        head, so a push makes it stale. On an issue it is the plan or trunk SHA the review ran against: never a
+        placeholder, and gather must have proved the commit exists in this repo (`sha_exists`). The gate can't
+        prove the /cso run reviewed that SHA; the link is there for the human reviewer to check."""
         for c in comments:
-            ok, sha = first_line_marker(c.get("body"), CSO_LINE_RE)
-            rest = (c.get("body") or "").strip().split("\n", 1)[1:]
-            if (ok and _login(c) in signers and trusted_marker(c) and rest and LINK_RE.search(rest[0])
-                    and (sha == head if on_pr else True)):
+            ok, sha, rest = marker_parts(c.get("body"), CSO_LINE_RE)
+            if not (ok and _login(c) in signers and trusted_marker(c) and CSO_LINK_RE.search(rest)):
+                continue
+            # On the PR the head itself is the proof; on an issue a placeholder never counts, and gather must
+            # have found the commit.
+            if (sha == head) if on_pr else (not placeholder_sha(sha) and c.get("sha_exists") is True):
                 return True
         return False
 
@@ -583,8 +604,9 @@ def check_tier(repo, pr, ctx, opts, builders) -> list[Finding]:
         return [Finding("tier", VIOLATION, "tier:high without a security sign-off.",
                         f"High tier needs a comment with `{SECURITY_SIGNOFF_MARKER}` from: {who}. `{own}` built or "
                         f"authored this PR, so `{own}`'s own sign-off counts only next to a /cso evidence comment "
-                        f"whose first line is `{CSO_MARKER} <full 40-char sha>` (the head SHA {head[:7]} on the PR, "
-                        "the reviewed SHA on an issue) and that links the /cso report. It must sit where the "
+                        f"whose first line is `{CSO_MARKER} <full 40-char lowercase sha>`: `{CSO_MARKER} {head}` on "
+                        "the PR, the reviewed SHA on an issue. A later line links the /cso run or its report "
+                        "comment (a NapticStacks Actions run, or an issue or PR comment). It must sit where the "
                         "sign-off is: on the PR, or on each tier:high issue this PR closes.",
                         f"Run /cso, post `{CSO_MARKER} <sha>` with the report link next to the sign-off, or ask "
                         f"a backup signer to sign. {rerun}")]
@@ -995,9 +1017,16 @@ def gather_v1(api: Api, ctx: dict) -> None:
                 issues[n] = {"labels": label_names(raw[n].get("labels")), "comments": []}
     ctx["issue_cache"] = raw
     ctx["linked_issues"] = issues
+    known: dict[str, bool] = {}
     for n, issue in issues.items():
         if issue is not None and effective_tier(issue["labels"]) == "high":
             issue["comments"] = api.paged(f"/repos/{repo}/issues/{n}/comments")
+            for c in issue["comments"]:
+                ok, sha = first_line_marker(c.get("body"), CSO_LINE_RE)
+                if ok and not placeholder_sha(sha):
+                    if sha not in known:
+                        known[sha] = commit_exists(api, repo, sha)
+                    c["sha_exists"] = known[sha]
     mark_edits(api, ctx["comments"] + ctx["reviews"]
                + [c for i in issues.values() if i for c in i["comments"]])
     builder = builder_of_record(pr.get("body"))
@@ -1009,6 +1038,18 @@ def gather_v1(api: Api, ctx: dict) -> None:
             if e.status != 404:
                 raise
             ctx["builder_account"] = None
+
+
+def commit_exists(api: Api, repo: str, sha: str) -> bool:
+    """Whether `sha` is a commit in `repo` (an issue-level /cso marker's reviewed SHA). 404 or 422 means no;
+    any other failure is a checker error."""
+    try:
+        api.get(f"/repos/{repo}/git/commits/{sha}")
+    except ApiError as e:
+        if e.status in (404, 422):
+            return False
+        raise
+    return True
 
 
 def issue_lookup_for(api: Api, repo: str, cache: dict | None = None):
